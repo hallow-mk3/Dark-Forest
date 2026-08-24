@@ -5,5 +5,11 @@
 //! CUDA kernel sequences: zero dynamic allocation, zero graph construction,
 //! zero mutex overhead per step.
 
+pub mod generate;
+pub mod kv_cache;
 pub mod static_gpt2;
+
+pub use generate::{generate, sample_next_token, SamplerConfig};
+pub use kv_cache::KVCache;
 pub use static_gpt2::StaticGPT2;
+
