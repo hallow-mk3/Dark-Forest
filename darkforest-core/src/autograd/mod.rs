@@ -10,9 +10,11 @@
 //! Phase 2 note: GradFn is a trait object — quantization hooks can be added as wrapper
 //! GradFns without touching the core engine.
 
+pub mod checkpoint;
 pub mod grad_fn;
 pub mod tape;
 pub mod value;
 
+pub use checkpoint::checkpoint;
 pub use tape::{is_grad_enabled, no_grad};
 pub use value::Value;

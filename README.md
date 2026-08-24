@@ -61,8 +61,12 @@ Benchmarks measured on **NVIDIA GeForce RTX 5070 Laptop GPU (sm_120 Blackwell)**
 * **Inference Optimization**:
   * `KVCache`: Pre-allocated static Key-Value cache for multi-layer autoregressive generation.
   * `generate()`: Production sampling engine supporting Temperature Scaling, Top-K, and Nucleus (Top-P) sampling.
+* **Memory Optimization & Fine-Tuning**:
+  * **LoRA (Low-Rank Adaptation)**: `LoRALinear` adapter layers with parameter isolation for efficient fine-tuning.
+  * **Gradient Checkpointing**: `checkpoint()` activation recomputation to trade compute for memory on long context sequences.
+  * **ZeRO-Offload AdamW**: `OffloadedAdamW` offloading 1st & 2nd optimizer moment states to system RAM to conserve GPU VRAM.
 * **Optimizers & Training**:
-  * In-place `AdamW` with decoupled weight decay and global norm gradient clipping.
+  * In-place `AdamW` and `OffloadedAdamW` with decoupled weight decay and global norm gradient clipping.
   * Schedulers: `StepLR`, `CosineAnnealingLR`, `ExponentialLR`.
   * Data pipelines: `Dataset`, `TensorDataset`, `DataLoader` with batch shuffling and `drop_last`.
 

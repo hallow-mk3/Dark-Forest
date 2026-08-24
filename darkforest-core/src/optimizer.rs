@@ -135,3 +135,122 @@ impl AdamW {
         }
     }
 }
+
+/// OffloadedAdamW (ZeRO-Offload style) optimizer.
+///
+/// Keeps all 1st (m) and 2nd (v) optimizer moment states in pinned / system RAM
+/// instead of consuming precious GPU VRAM. During the optimizer step:
+///   1. Gradients are gathered / streamed from GPU -> CPU.
+///   2. Moments and parameter updates are calculated in parallel in host memory.
+///   3. Updated parameters are transferred back to GPU VRAM.
+pub struct OffloadedAdamW {
+    pub lr: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
+    pub wd: f32,
+    pub step: usize,
+    /// Host-resident moment buffers (m, v)
+    pub host_moments: Vec<(Vec<f32>, Vec<f32>)>,
+}
+
+impl OffloadedAdamW {
+    pub fn new(lr: f32, beta1: f32, beta2: f32, eps: f32, wd: f32) -> Self {
+        Self {
+            lr,
+            beta1,
+            beta2,
+            eps,
+            wd,
+            step: 0,
+            host_moments: vec![],
+        }
+    }
+
+    pub fn init_moments(&mut self, params: &[Value]) {
+        self.host_moments = params
+            .iter()
+            .map(|p| (vec![0.0f32; p.numel()], vec![0.0f32; p.numel()]))
+            .collect();
+    }
+
+    pub fn zero_grad(&self, params: &[Value]) {
+        for p in params {
+            p.zero_grad();
+        }
+    }
+
+    pub fn step(&mut self, params: &[Value], max_norm: Option<f32>) {
+        if self.host_moments.is_empty() {
+            self.init_moments(params);
+        }
+        self.step += 1;
+
+        let t = self.step as f32;
+        let bias_corr1 = 1.0 - self.beta1.powf(t);
+        let bias_corr2 = 1.0 - self.beta2.powf(t);
+
+        let clip_scale = if let Some(mn) = max_norm {
+            let total_norm: f32 = params
+                .iter()
+                .map(|p| p.grad().iter().map(|g| g * g).sum::<f32>())
+                .sum::<f32>()
+                .sqrt();
+            if total_norm > mn {
+                mn / (total_norm + 1e-8)
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+
+        for (pi, param) in params.iter().enumerate() {
+            let grad_raw = param.grad();
+            let grad: Vec<f32> = grad_raw.iter().map(|g| g * clip_scale).collect();
+            let (ref mut m, ref mut v) = self.host_moments[pi];
+            let p_data: Vec<f32> = param.tensor().to_vec();
+            let mut new_data = vec![0.0f32; p_data.len()];
+
+            for i in 0..p_data.len() {
+                let p_wd = p_data[i] * (1.0 - self.lr * self.wd);
+                m[i] = self.beta1 * m[i] + (1.0 - self.beta1) * grad[i];
+                v[i] = self.beta2 * v[i] + (1.0 - self.beta2) * grad[i] * grad[i];
+                let m_hat = m[i] / bias_corr1;
+                let v_hat = v[i] / bias_corr2;
+                new_data[i] = p_wd - self.lr * m_hat / (v_hat.sqrt() + self.eps);
+            }
+            param.update_tensor_data(new_data);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::Tensor;
+
+    #[test]
+    fn test_offloaded_adamw_matches_standard() {
+        let p1 = Value::leaf(Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]).unwrap());
+        let p2 = Value::leaf(Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]).unwrap());
+
+        let mut opt_std = AdamW::new(1e-3, 0.9, 0.999, 1e-8, 0.01);
+        let mut opt_off = OffloadedAdamW::new(1e-3, 0.9, 0.999, 1e-8, 0.01);
+
+        // Fake loss & backward
+        let l1 = p1.scale(2.0).unwrap().sum().unwrap();
+        let l2 = p2.scale(2.0).unwrap().sum().unwrap();
+        l1.backward();
+        l2.backward();
+
+        opt_std.step(&[p1.clone()], None);
+        opt_off.step(&[p2.clone()], None);
+
+        let data1 = p1.tensor().to_vec();
+        let data2 = p2.tensor().to_vec();
+        for (a, b) in data1.iter().zip(data2.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+}

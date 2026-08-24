@@ -13,9 +13,10 @@ pub mod optimizer;
 pub mod scheduler;
 pub mod tensor;
 
-pub use autograd::no_grad;
+pub use autograd::{checkpoint, no_grad};
 pub use data::{DataLoader, Dataset, TensorDataset};
 pub use engine::StaticGPT2;
+pub use optimizer::{AdamW, OffloadedAdamW};
 pub use scheduler::{CosineAnnealingLR, ExponentialLR, LRScheduler, StepLR};
 pub use tensor::{DType, Device, Shape, Tensor};
 

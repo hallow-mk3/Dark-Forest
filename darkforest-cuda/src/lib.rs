@@ -1040,7 +1040,6 @@ impl DeviceTensor {
     /// Casts X and W to BF16 on the fly, runs cublasGemmEx with CUBLAS_COMPUTE_32F
     /// (Tensor Core + FP32 accumulation), result is FP32. Requires scratch BF16 buffers
     /// for X and W (passed in to avoid per-call allocation).
-    #[cfg(feature = "cuda")]
     #[allow(clippy::too_many_arguments)]
     pub fn linear_bf16_into(
         &self,

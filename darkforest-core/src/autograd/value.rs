@@ -152,7 +152,7 @@ impl Value {
         self._backward_recursive(&root_grad);
     }
 
-    fn _backward_recursive(&self, upstream_grad: &Tensor) {
+    pub(crate) fn _backward_recursive(&self, upstream_grad: &Tensor) {
         let (grad_fn_opt, inputs) = {
             let inner = self.0.lock().unwrap();
             if inner.grad_fn.is_none() {
