@@ -1,0 +1,16 @@
+[package]
+name = "darkforest-cuda"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[features]
+cuda_kernels = []
+
+[dependencies]
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+log       = { workspace = true }
+
+[build-dependencies]
+# cc = "1"  # uncomment when CUDA toolkit is available
