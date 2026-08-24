@@ -1,0 +1,8 @@
+[package]
+name = "models"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+darkforest-core = { path = "../darkforest-core" }
+anyhow = { workspace = true }
