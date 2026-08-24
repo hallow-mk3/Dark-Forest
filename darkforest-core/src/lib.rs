@@ -4,16 +4,21 @@
 //! Architecture: Tensor → Ops → Autograd Graph → Optimizer
 
 pub mod autograd;
+pub mod data;
 pub mod engine;
 pub mod grad_check;
 pub mod nn;
 pub mod ops;
 pub mod optimizer;
+pub mod scheduler;
 pub mod tensor;
 
 pub use autograd::no_grad;
+pub use data::{DataLoader, Dataset, TensorDataset};
 pub use engine::StaticGPT2;
+pub use scheduler::{CosineAnnealingLR, ExponentialLR, LRScheduler, StepLR};
 pub use tensor::{DType, Device, Shape, Tensor};
+
 
 pub fn cuda_sync() -> anyhow::Result<()> {
     #[cfg(feature = "cuda")]
