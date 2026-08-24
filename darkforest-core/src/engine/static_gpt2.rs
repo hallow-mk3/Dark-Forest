@@ -726,6 +726,219 @@ impl StaticGPT2 {
 
         Ok(self.pinned_loss.read_f32())
     }
+
+    /// Diagnostic: run one step with `cudaDeviceSynchronize` after EVERY kernel call
+    /// so we can isolate which exact operation takes the most wall-clock time.
+    /// Do NOT call this during training — it is purely for profiling.
+    pub fn profile_step(&mut self, input_tokens: &[usize], target_tokens: &[usize]) -> Result<()> {
+        use std::time::Instant;
+        use darkforest_cuda::DeviceTensor;
+
+        assert_eq!(input_tokens.len(), self.seq_len);
+        assert_eq!(target_tokens.len(), self.seq_len);
+        self.step_count += 1;
+
+        for (i, &tok) in input_tokens.iter().enumerate() { self.h_input_u32[i] = tok as u32; }
+        for (i, &tok) in target_tokens.iter().enumerate() { self.h_target_u32[i] = tok as u32; }
+
+        let t = Instant::now();
+        self.d_input_indices.upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
+        self.d_target_indices.upload_bytes(self.h_target_u32.as_ptr() as *const u8, self.seq_len * 4)?;
+        crate::cuda_sync()?;
+        println!("  {:50} {:7.3} ms", "H2D upload indices", t.elapsed().as_secs_f64() * 1000.0);
+
+        macro_rules! prof {
+            ($label:expr, $body:expr) => {{
+                let t = Instant::now();
+                $body;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", $label, t.elapsed().as_secs_f64() * 1000.0);
+            }};
+        }
+
+        let scale = (self.d_model as f32 / self.n_heads as f32).powf(-0.5);
+
+        prof!("embedding lookup tok", {
+            DeviceTensor::embedding_lookup_device_indices(&self.d_input_indices, self.seq_len, &self.tok_emb, &mut self.tok_out)?;
+        });
+        prof!("embedding lookup pos", {
+            DeviceTensor::embedding_lookup_device_indices(&self.d_pos_indices, self.seq_len, &self.pos_emb, &mut self.pos_out)?;
+        });
+        prof!("tok + pos add", {
+            self.tok_out.add_into(&self.pos_out, &mut self.x_in[0])?;
+        });
+
+        for l in 0..self.n_layers {
+            let lw = &self.layers[l];
+            let la = &mut self.layer_acts[l];
+            let label_ln1 = format!("L{l} layernorm1");
+            let label_q   = format!("L{l} Q proj linear");
+            let label_k   = format!("L{l} K proj linear");
+            let label_v   = format!("L{l} V proj linear");
+            let label_attn = format!("L{l} attention fwd");
+            let label_op  = format!("L{l} O proj + residual");
+            let label_ln2 = format!("L{l} layernorm2");
+            let label_mu  = format!("L{l} MLP up linear");
+            let label_mg  = format!("L{l} MLP gelu");
+            let label_md  = format!("L{l} MLP down + residual");
+
+            {
+                let t = Instant::now();
+                self.x_in[l].layernorm_into(Some(&lw.ln1_gamma), Some(&lw.ln1_beta), &mut la.ln1_out, &mut la.ln1_mean, &mut la.ln1_rstd)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_ln1, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                la.ln1_out.linear_into(&lw.wq, Some(&lw.bq), &mut la.q)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_q, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                la.ln1_out.linear_into(&lw.wk, Some(&lw.bk), &mut la.k)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_k, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                la.ln1_out.linear_into(&lw.wv, Some(&lw.bv), &mut la.v)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_v, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                self.attn_contexts[l].forward_device_into(&la.q, &la.k, &la.v, scale, true, &mut la.attn_out)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_attn, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                la.attn_out.linear_into(&lw.wo, Some(&lw.bo), &mut la.proj_out)?;
+                self.x_in[l].add_into(&la.proj_out, &mut la.x_mid)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_op, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                la.x_mid.layernorm_into(Some(&lw.ln2_gamma), Some(&lw.ln2_beta), &mut la.ln2_out, &mut la.ln2_mean, &mut la.ln2_rstd)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_ln2, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                la.ln2_out.linear_into(&lw.w1, Some(&lw.b1), &mut la.mlp_h)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_mu, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                la.mlp_h.gelu_into(&mut la.mlp_a)?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_mg, t.elapsed().as_secs_f64() * 1000.0);
+            }
+            {
+                let t = Instant::now();
+                la.mlp_a.linear_into(&lw.w2, Some(&lw.b2), &mut la.mlp_out)?;
+                la.x_mid.add_into(&la.mlp_out, &mut self.x_in[l + 1])?;
+                crate::cuda_sync()?;
+                println!("  {:50} {:7.3} ms", label_md, t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+
+        prof!("final layernorm", {
+            self.x_in[self.n_layers].layernorm_into(Some(&self.ln_f_gamma), Some(&self.ln_f_beta), &mut self.ln_f_out, &mut self.ln_f_mean, &mut self.ln_f_rstd)?;
+        });
+        prof!("lm head linear", {
+            self.ln_f_out.linear_into(&self.lm_head, None, &mut self.logits)?;
+        });
+        prof!("cross-entropy forward", {
+            DeviceTensor::cross_entropy_device_targets(&self.logits, &self.d_target_indices, &mut self.probs, &mut self.loss_tensor)?;
+            self.loss_tensor.async_download_scalar_f32(&self.pinned_loss)?;
+        });
+
+        // --- BACKWARD ---
+        prof!("cross-entropy backward", {
+            DeviceTensor::cross_entropy_backward_device_targets(&self.probs, &self.d_target_indices, &self.grad_one, &mut self.d_logits)?;
+        });
+        prof!("lm head backward", {
+            DeviceTensor::linear_backward_into(&self.ln_f_out, &self.lm_head, &self.d_logits, &mut self.d_ln_f_out, &mut self.d_lm_head, None)?;
+        });
+        prof!("final layernorm backward", {
+            DeviceTensor::layernorm_backward_into(&self.d_ln_f_out, &self.x_in[self.n_layers], Some(&self.ln_f_gamma), &self.ln_f_mean, &self.ln_f_rstd, &mut self.dx_comb, Some(&mut self.d_ln_f_gamma), Some(&mut self.d_ln_f_beta))?;
+        });
+
+        for l in (0..self.n_layers).rev() {
+            let label = format!("L{l} block backward (all)");
+            let t = Instant::now();
+            let lw = &self.layers[l];
+            let la = &self.layer_acts[l];
+            let lg = &mut self.layer_grads[l];
+
+            lg.d_mlp_out.copy_from(&self.dx_comb)?;
+            lg.dx.copy_from(&self.dx_comb)?;
+            let d_x_mid_from_above = &mut lg.dx;
+
+            DeviceTensor::linear_backward_into(&la.mlp_a, &lw.w2, &lg.d_mlp_out, &mut lg.d_mlp_a, &mut lg.d_w2, Some(&mut lg.d_b2))?;
+            la.mlp_h.gelu_backward_into(&lg.d_mlp_a, &mut lg.d_mlp_h)?;
+            DeviceTensor::linear_backward_into(&la.ln2_out, &lw.w1, &lg.d_mlp_h, &mut lg.d_ln2_out, &mut lg.d_w1, Some(&mut lg.d_b1))?;
+            DeviceTensor::layernorm_backward_into(&lg.d_ln2_out, &la.x_mid, Some(&lw.ln2_gamma), &la.ln2_mean, &la.ln2_rstd, &mut self.dx_comb, Some(&mut lg.d_ln2_gamma), Some(&mut lg.d_ln2_beta))?;
+            d_x_mid_from_above.add_inplace(&self.dx_comb)?;
+            lg.d_proj_out.copy_from(d_x_mid_from_above)?;
+            DeviceTensor::linear_backward_into(&la.attn_out, &lw.wo, &lg.d_proj_out, &mut lg.d_attn_out, &mut lg.d_wo, Some(&mut lg.d_bo))?;
+            self.attn_contexts[l].backward_device_into(&la.q, &la.k, &la.v, &lg.d_attn_out, scale, true, &mut lg.d_q, &mut lg.d_k, &mut lg.d_v)?;
+            DeviceTensor::linear_backward_into(&la.ln1_out, &lw.wq, &lg.d_q, &mut lg.d_ln1_out, &mut lg.d_wq, Some(&mut lg.d_bq))?;
+            DeviceTensor::linear_backward_accumulate_into(&la.ln1_out, &lw.wk, &lg.d_k, &mut lg.d_ln1_out, &mut lg.d_wk, Some(&mut lg.d_bk))?;
+            DeviceTensor::linear_backward_accumulate_into(&la.ln1_out, &lw.wv, &lg.d_v, &mut lg.d_ln1_out, &mut lg.d_wv, Some(&mut lg.d_bv))?;
+            DeviceTensor::layernorm_backward_into(&lg.d_ln1_out, &self.x_in[l], Some(&lw.ln1_gamma), &la.ln1_mean, &la.ln1_rstd, &mut self.dx_comb, Some(&mut lg.d_ln1_gamma), Some(&mut lg.d_ln1_beta))?;
+            self.dx_comb.add_inplace(&lg.dx)?;
+
+            crate::cuda_sync()?;
+            println!("  {:50} {:7.3} ms", label, t.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        prof!("embedding backward", {
+            DeviceTensor::embedding_backward_device_indices(&self.d_input_indices, self.seq_len, &self.dx_comb, &mut self.d_tok_emb, self.vocab_size, self.d_model)?;
+            DeviceTensor::embedding_backward_device_indices(&self.d_pos_indices, self.seq_len, &self.dx_comb, &mut self.d_pos_emb, self.seq_len, self.d_model)?;
+        });
+
+        // AdamW (just time one full update pass)
+        let t_adamw = Instant::now();
+        let t_val = self.step_count as f32;
+        let lr = self.lr;
+        let (b1, b2, eps, wd) = (self.beta1, self.beta2, self.eps, self.wd);
+        let bc1 = 1.0 - b1.powf(t_val);
+        let bc2 = 1.0 - b2.powf(t_val);
+        macro_rules! update {
+            ($p:expr, $g:expr, $mom:expr) => {
+                DeviceTensor::adamw_update(&$p, &$mom.m, &$mom.v, &$g, lr, b1, b2, eps, wd, bc1, bc2)?;
+            };
+        }
+        update!(self.tok_emb, self.d_tok_emb, self.m_tok);
+        update!(self.pos_emb, self.d_pos_emb, self.m_pos);
+        update!(self.ln_f_gamma, self.d_ln_f_gamma, self.m_ln_f_gamma);
+        update!(self.ln_f_beta, self.d_ln_f_beta, self.m_ln_f_beta);
+        update!(self.lm_head, self.d_lm_head, self.m_lm_head);
+        for l in 0..self.n_layers {
+            let lw = &mut self.layers[l];
+            let lg = &self.layer_grads[l];
+            let lm = &mut self.layer_moments[l];
+            update!(lw.ln1_gamma, lg.d_ln1_gamma, lm.ln1_gamma);
+            update!(lw.ln1_beta, lg.d_ln1_beta, lm.ln1_beta);
+            update!(lw.wq, lg.d_wq, lm.wq); update!(lw.bq, lg.d_bq, lm.bq);
+            update!(lw.wk, lg.d_wk, lm.wk); update!(lw.bk, lg.d_bk, lm.bk);
+            update!(lw.wv, lg.d_wv, lm.wv); update!(lw.bv, lg.d_bv, lm.bv);
+            update!(lw.wo, lg.d_wo, lm.wo); update!(lw.bo, lg.d_bo, lm.bo);
+            update!(lw.ln2_gamma, lg.d_ln2_gamma, lm.ln2_gamma);
+            update!(lw.ln2_beta, lg.d_ln2_beta, lm.ln2_beta);
+            update!(lw.w1, lg.d_w1, lm.w1); update!(lw.b1, lg.d_b1, lm.b1);
+            update!(lw.w2, lg.d_w2, lm.w2); update!(lw.b2, lg.d_b2, lm.b2);
+        }
+        crate::cuda_sync()?;
+        println!("  {:50} {:7.3} ms", "AdamW update (all params)", t_adamw.elapsed().as_secs_f64() * 1000.0);
+
+        Ok(())
+    }
 }
 
 
@@ -738,6 +951,9 @@ impl StaticGPT2 {
     pub fn new(_vs: usize, _dm: usize, _nh: usize, _nl: usize, _df: usize, _sl: usize, _lr: f32)
         -> Result<Self> { Ok(Self) }
     pub fn step(&mut self, _in: &[usize], _tgt: &[usize]) -> Result<f32> {
+        Err(anyhow!("CUDA required for StaticGPT2"))
+    }
+    pub fn profile_step(&mut self, _in: &[usize], _tgt: &[usize]) -> Result<()> {
         Err(anyhow!("CUDA required for StaticGPT2"))
     }
 }

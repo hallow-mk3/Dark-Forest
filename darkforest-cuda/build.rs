@@ -202,4 +202,6 @@ fn main() {
     println!("cargo:rustc-link-search=native={}/lib/x64", cuda_path.display());
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-link-lib=cublas");
+    println!("cargo:rustc-cfg=darkforest_cuda_kernels");
 }
+
