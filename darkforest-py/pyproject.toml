@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "darkforest"
+version = "0.1.0"
+description = "Dark Forest: a Rust-first ML runtime with explicit device residency"
+readme = "../README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Dark Forest contributors" }]
+keywords = ["ml", "autograd", "rust", "cuda", "machine-learning"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[tool.maturin]
+features = ["python", "cuda"]
+module-name = "darkforest._darkforest_py"
+python-source = "python"
+manifest-path = "Cargo.toml"
+strip = true
