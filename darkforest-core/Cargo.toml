@@ -1,0 +1,39 @@
+[package]
+name = "darkforest-core"
+version = "0.1.0"
+description = "Autograd and tensor runtime for GPU-first ML experiments"
+license = "MIT"
+authors = ["Dark Forest contributors"]
+repository = "https://github.com/your-org/darkforest"
+keywords = ["ml", "autograd", "tensor", "rust", "cuda"]
+categories = ["science", "machine-learning", "graphics"]
+edition = "2021"
+
+[[bin]]
+name = "grad_check"
+path = "src/bin/grad_check.rs"
+
+[[bin]]
+name = "train_gpt2_small"
+path = "src/bin/train_gpt2_small.rs"
+
+[[bin]]
+name = "train_static"
+path = "src/bin/train_static.rs"
+
+[dependencies]
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+half       = { workspace = true }
+num-traits = { workspace = true }
+rand       = { workspace = true }
+rand_distr = { workspace = true }
+rayon      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+log        = { workspace = true }
+env_logger = { workspace = true }
+darkforest-cuda = { path = "../darkforest-cuda", optional = true }
+
+[features]
+cuda = ["dep:darkforest-cuda", "darkforest-cuda/cuda_kernels"]
