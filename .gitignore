@@ -1,0 +1,28 @@
+# Rust build artifacts
+target/
+
+# Python artifacts
+*.pyd
+*.so
+*.pyc
+*.pyo
+__pycache__/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.whl
+
+# IDE
+.idea/
+.vscode/
+
+# Benchmark / experiment outputs
+benchmark_results.json
+training_loss.csv
+training_loss_static.csv
+
+# OS
+.DS_Store
+Thumbs.db
