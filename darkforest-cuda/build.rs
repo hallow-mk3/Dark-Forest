@@ -20,9 +20,12 @@ fn find_cuda_root() -> PathBuf {
         PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"),
     ];
 
-    candidates.into_iter().find(|p| p.join("bin").join("nvcc.exe").exists()).unwrap_or_else(|| {
-        PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3")
-    })
+    candidates
+        .into_iter()
+        .find(|p| p.join("bin").join("nvcc.exe").exists())
+        .unwrap_or_else(|| {
+            PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3")
+        })
 }
 
 fn find_cl_from_vs() -> Option<PathBuf> {
@@ -80,7 +83,10 @@ fn find_cl_from_vs() -> Option<PathBuf> {
 }
 
 fn find_cl() -> Option<PathBuf> {
-    if let Ok(output) = std::process::Command::new("where.exe").arg("cl.exe").output() {
+    if let Ok(output) = std::process::Command::new("where.exe")
+        .arg("cl.exe")
+        .output()
+    {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
@@ -125,7 +131,10 @@ fn main() {
     let cl_path = cl.expect("cl.exe path missing after validation");
     let cl_dir = cl_path.parent().unwrap();
     let cuda_bin = cuda_path.join("bin");
-    let mut path_entries = vec![cl_dir.to_string_lossy().to_string(), cuda_bin.to_string_lossy().to_string()];
+    let mut path_entries = vec![
+        cl_dir.to_string_lossy().to_string(),
+        cuda_bin.to_string_lossy().to_string(),
+    ];
     if let Some(existing) = env::var_os("PATH") {
         path_entries.push(existing.to_string_lossy().to_string());
     }
@@ -138,6 +147,7 @@ fn main() {
         "matmul.cu",
         "attention_fused.cu",
         "bf16_cast.cu",
+        "quantization.cu",
     ];
 
     for kernel in &kernels {
@@ -199,9 +209,11 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static={lib_name}");
-    println!("cargo:rustc-link-search=native={}/lib/x64", cuda_path.display());
+    println!(
+        "cargo:rustc-link-search=native={}/lib/x64",
+        cuda_path.display()
+    );
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-link-lib=cublas");
     println!("cargo:rustc-cfg=darkforest_cuda_kernels");
 }
-

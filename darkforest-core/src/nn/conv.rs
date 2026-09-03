@@ -1,4 +1,4 @@
-﻿//! Conv1d and Conv2d neural network layers.
+//! Conv1d and Conv2d neural network layers.
 
 use crate::autograd::Value;
 use crate::tensor::Tensor;
@@ -54,7 +54,11 @@ impl Conv2d {
         }
         let (batch, in_c, h, w) = (xt.shape[0], xt.shape[1], xt.shape[2], xt.shape[3]);
         if in_c != self.in_channels {
-            return Err(anyhow!("Conv2d expected {} in_channels, got {}", self.in_channels, in_c));
+            return Err(anyhow!(
+                "Conv2d expected {} in_channels, got {}",
+                self.in_channels,
+                in_c
+            ));
         }
 
         let (kh, kw) = self.kernel_size;
@@ -82,16 +86,27 @@ impl Conv2d {
                                     let cur_h = ih_start + f_h as isize;
                                     let cur_w = iw_start + f_w as isize;
 
-                                    if cur_h >= 0 && cur_h < h as isize && cur_w >= 0 && cur_w < w as isize {
-                                        let in_idx = b * (in_c * h * w) + ic * (h * w) + (cur_h as usize) * w + (cur_w as usize);
-                                        let w_idx = oc * (in_c * kh * kw) + ic * (kh * kw) + f_h * kw + f_w;
+                                    if cur_h >= 0
+                                        && cur_h < h as isize
+                                        && cur_w >= 0
+                                        && cur_w < w as isize
+                                    {
+                                        let in_idx = b * (in_c * h * w)
+                                            + ic * (h * w)
+                                            + (cur_h as usize) * w
+                                            + (cur_w as usize);
+                                        let w_idx =
+                                            oc * (in_c * kh * kw) + ic * (kh * kw) + f_h * kw + f_w;
                                         sum += x_data[in_idx] * w_data[w_idx];
                                     }
                                 }
                             }
                         }
 
-                        let out_idx = b * (self.out_channels * out_h * out_w) + oc * (out_h * out_w) + oh * out_w + ow;
+                        let out_idx = b * (self.out_channels * out_h * out_w)
+                            + oc * (out_h * out_w)
+                            + oh * out_w
+                            + ow;
                         out_data[out_idx] = sum;
                     }
                 }
@@ -111,7 +126,8 @@ impl Conv2d {
                 for oc in 0..self.out_channels {
                     let bias_val = b_data[oc];
                     for p in 0..(out_h * out_w) {
-                        let idx = nb * (self.out_channels * out_h * out_w) + oc * (out_h * out_w) + p;
+                        let idx =
+                            nb * (self.out_channels * out_h * out_w) + oc * (out_h * out_w) + p;
                         v_data[idx] += bias_val;
                     }
                 }

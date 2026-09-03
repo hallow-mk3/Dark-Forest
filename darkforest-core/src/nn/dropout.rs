@@ -1,4 +1,4 @@
-﻿//! Dropout and Dropout2d regularization layers.
+//! Dropout and Dropout2d regularization layers.
 
 use crate::autograd::Value;
 use crate::tensor::Tensor;
@@ -25,9 +25,19 @@ impl Dropout {
         let data: Vec<f32> = xt
             .to_vec()
             .iter()
-            .map(|&v| if rng.gen::<f32>() >= self.p { v * scale } else { 0.0 })
+            .map(|&v| {
+                if rng.gen::<f32>() >= self.p {
+                    v * scale
+                } else {
+                    0.0
+                }
+            })
             .collect();
-        Ok(Value::leaf(Tensor::from_vec_device(data, xt.shape.clone(), xt.device)?))
+        Ok(Value::leaf(Tensor::from_vec_device(
+            data,
+            xt.shape.clone(),
+            xt.device,
+        )?))
     }
 }
 
@@ -67,6 +77,10 @@ impl Dropout2d {
             }
         }
 
-        Ok(Value::leaf(Tensor::from_vec_device(out, xt.shape.clone(), xt.device)?))
+        Ok(Value::leaf(Tensor::from_vec_device(
+            out,
+            xt.shape.clone(),
+            xt.device,
+        )?))
     }
 }

@@ -29,13 +29,24 @@ def run_darkforest_benchmark():
     print("=" * 65)
     print(" 2/2 RUNNING DARK FOREST STATIC CUDA BENCHMARK (12L GPT-2)...")
     print("=" * 65)
-    cmd = [
-        "cargo", "run", "-p", "darkforest-core", "--release",
-        "--bin", "train_static", "--features", "cuda", "--",
-        "--steps", "50", "--ctx-len", "128", "--d-model", "768",
-        "--n-layers", "12", "--n-heads", "12", "--d-ff", "3072",
-        "--vocab-size", "50257"
-    ]
+    
+    # Path to release binary
+    exe_path = os.path.join(os.path.dirname(__file__), "target", "release", "train_static.exe")
+    if os.path.exists(exe_path):
+        cmd = [
+            exe_path,
+            "--steps", "50", "--ctx-len", "128", "--d-model", "768",
+            "--n-layers", "12", "--n-heads", "12", "--d-ff", "3072",
+            "--vocab-size", "50257"
+        ]
+    else:
+        cmd = [
+            "cargo", "run", "-p", "darkforest-core", "--release",
+            "--bin", "train_static", "--features", "cuda", "--",
+            "--steps", "50", "--ctx-len", "128", "--d-model", "768",
+            "--n-layers", "12", "--n-heads", "12", "--d-ff", "3072",
+            "--vocab-size", "50257"
+        ]
     env = os.environ.copy()
     env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     res = subprocess.run(cmd, capture_output=True, text=True, env=env)

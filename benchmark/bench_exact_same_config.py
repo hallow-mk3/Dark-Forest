@@ -1,4 +1,4 @@
-﻿import torch
+import torch
 import torch.nn as nn
 import statistics
 import time
@@ -15,6 +15,9 @@ WARMUP   = 5
 DTYPE    = torch.float32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    torch.cuda.set_per_process_memory_fraction(0.85, 0)
+    print("GPU Safety Limit Active: VRAM capped at 85% capacity.")
 print(f"Device : {torch.cuda.get_device_name(0)}")
 print(f"PyTorch: {torch.__version__}")
 print(f"Exact apples-to-apples configuration:")

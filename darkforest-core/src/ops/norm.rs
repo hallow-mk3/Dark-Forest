@@ -1,4 +1,4 @@
-﻿//! Normalization ops — batch_norm, instance_norm, group_norm, rms_norm.
+//! Normalization ops — batch_norm, instance_norm, group_norm, rms_norm.
 
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
@@ -48,7 +48,11 @@ pub fn group_norm(
     let n = x.shape[0];
     let c = x.shape[1];
     if c % num_groups != 0 {
-        return Err(anyhow!("group_norm: C={} not divisible by num_groups={}", c, num_groups));
+        return Err(anyhow!(
+            "group_norm: C={} not divisible by num_groups={}",
+            c,
+            num_groups
+        ));
     }
     let group_size = c / num_groups;
     let spatial: usize = x.shape[2..].iter().product::<usize>().max(1);
@@ -107,7 +111,9 @@ pub fn instance_norm(
     eps: f32,
 ) -> Result<Tensor> {
     if x.ndim() < 3 {
-        return Err(anyhow!("instance_norm: input must be at least 3D [N, C, ...]"));
+        return Err(anyhow!(
+            "instance_norm: input must be at least 3D [N, C, ...]"
+        ));
     }
     let n = x.shape[0];
     let c = x.shape[1];
@@ -178,7 +184,10 @@ pub fn batch_norm(
             }
             s / num_per_channel as f32
         } else {
-            running_stats.as_ref().map(|rs| rs.running_mean[ch]).unwrap_or(0.0)
+            running_stats
+                .as_ref()
+                .map(|rs| rs.running_mean[ch])
+                .unwrap_or(0.0)
         };
 
         let var = if training {
@@ -191,7 +200,10 @@ pub fn batch_norm(
             }
             v / num_per_channel as f32
         } else {
-            running_stats.as_ref().map(|rs| rs.running_var[ch]).unwrap_or(1.0)
+            running_stats
+                .as_ref()
+                .map(|rs| rs.running_var[ch])
+                .unwrap_or(1.0)
         };
 
         let rstd = 1.0 / (var + eps).sqrt();
@@ -215,8 +227,8 @@ pub fn batch_norm(
                 // Unbiased variance for running stats (Bessel correction: * N/(N-1))
                 let n_f = num_per_channel as f32;
                 let unbias = if n_f > 1.0 { n_f / (n_f - 1.0) } else { 1.0 };
-                rs.running_var[ch] =
-                    (1.0 - momentum) * rs.running_var[ch] + momentum * (1.0 / rstds[ch].powi(2) - eps) * unbias;
+                rs.running_var[ch] = (1.0 - momentum) * rs.running_var[ch]
+                    + momentum * (1.0 / rstds[ch].powi(2) - eps) * unbias;
             }
         }
     }

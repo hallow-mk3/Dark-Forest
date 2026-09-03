@@ -18,71 +18,77 @@ struct LayerWeights {
     ln1_gamma: DeviceTensor, // [d_model]
     ln1_beta: DeviceTensor,  // [d_model]
     // Attention projections: weight [d_model, d_model], bias [d_model]
-    wq: DeviceTensor, bq: DeviceTensor,
-    wk: DeviceTensor, bk: DeviceTensor,
-    wv: DeviceTensor, bv: DeviceTensor,
-    wo: DeviceTensor, bo: DeviceTensor,
+    wq: DeviceTensor,
+    bq: DeviceTensor,
+    wk: DeviceTensor,
+    bk: DeviceTensor,
+    wv: DeviceTensor,
+    bv: DeviceTensor,
+    wo: DeviceTensor,
+    bo: DeviceTensor,
     // LayerNorm 2
     ln2_gamma: DeviceTensor,
     ln2_beta: DeviceTensor,
     // MLP
-    w1: DeviceTensor, b1: DeviceTensor, // [d_ff, d_model] / [d_ff]
-    w2: DeviceTensor, b2: DeviceTensor, // [d_model, d_ff] / [d_model]
+    w1: DeviceTensor,
+    b1: DeviceTensor, // [d_ff, d_model] / [d_ff]
+    w2: DeviceTensor,
+    b2: DeviceTensor, // [d_model, d_ff] / [d_model]
 }
 
 /// Per-layer forward activation buffers (pre-allocated, reused every step).
 #[cfg(feature = "cuda")]
 struct LayerActivations {
-    ln1_out: DeviceTensor,   // [seq, d_model]
-    ln1_mean: DeviceTensor,  // [seq]
-    ln1_rstd: DeviceTensor,  // [seq]
-    q: DeviceTensor,         // [seq, d_model]
-    k: DeviceTensor,         // [seq, d_model]
-    v: DeviceTensor,         // [seq, d_model]
-    attn_out: DeviceTensor,  // [seq, d_model]
-    proj_out: DeviceTensor,  // [seq, d_model]
-    x_mid: DeviceTensor,     // [seq, d_model]  (x after attn residual)
-    ln2_out: DeviceTensor,   // [seq, d_model]
-    ln2_mean: DeviceTensor,  // [seq]
-    ln2_rstd: DeviceTensor,  // [seq]
-    mlp_h: DeviceTensor,     // [seq, d_ff]
-    mlp_a: DeviceTensor,     // [seq, d_ff]  (after gelu)
-    mlp_out: DeviceTensor,   // [seq, d_model]
+    ln1_out: DeviceTensor,  // [seq, d_model]
+    ln1_mean: DeviceTensor, // [seq]
+    ln1_rstd: DeviceTensor, // [seq]
+    q: DeviceTensor,        // [seq, d_model]
+    k: DeviceTensor,        // [seq, d_model]
+    v: DeviceTensor,        // [seq, d_model]
+    attn_out: DeviceTensor, // [seq, d_model]
+    proj_out: DeviceTensor, // [seq, d_model]
+    x_mid: DeviceTensor,    // [seq, d_model]  (x after attn residual)
+    ln2_out: DeviceTensor,  // [seq, d_model]
+    ln2_mean: DeviceTensor, // [seq]
+    ln2_rstd: DeviceTensor, // [seq]
+    mlp_h: DeviceTensor,    // [seq, d_ff]
+    mlp_a: DeviceTensor,    // [seq, d_ff]  (after gelu)
+    mlp_out: DeviceTensor,  // [seq, d_model]
 }
 
 /// Per-layer gradient buffers (pre-allocated, reused every step).
 #[cfg(feature = "cuda")]
 struct LayerGrads {
     // upstream gradient flowing into this layer from above
-    dx: DeviceTensor,           // [seq, d_model]
+    dx: DeviceTensor, // [seq, d_model]
     // MLP backward
-    d_mlp_out: DeviceTensor,    // [seq, d_model]
-    d_mlp_a: DeviceTensor,      // [seq, d_ff]
-    d_mlp_h: DeviceTensor,      // [seq, d_ff]
-    d_w2: DeviceTensor,         // [d_model, d_ff]
-    d_b2: DeviceTensor,         // [d_model]
-    d_w1: DeviceTensor,         // [d_ff, d_model]
-    d_b1: DeviceTensor,         // [d_ff]
-    d_ln2_out: DeviceTensor,    // [seq, d_model]
-    d_ln2_gamma: DeviceTensor,  // [d_model]
-    d_ln2_beta: DeviceTensor,   // [d_model]
+    d_mlp_out: DeviceTensor,   // [seq, d_model]
+    d_mlp_a: DeviceTensor,     // [seq, d_ff]
+    d_mlp_h: DeviceTensor,     // [seq, d_ff]
+    d_w2: DeviceTensor,        // [d_model, d_ff]
+    d_b2: DeviceTensor,        // [d_model]
+    d_w1: DeviceTensor,        // [d_ff, d_model]
+    d_b1: DeviceTensor,        // [d_ff]
+    d_ln2_out: DeviceTensor,   // [seq, d_model]
+    d_ln2_gamma: DeviceTensor, // [d_model]
+    d_ln2_beta: DeviceTensor,  // [d_model]
     // Attention backward
-    d_proj_out: DeviceTensor,   // [seq, d_model]
-    d_attn_out: DeviceTensor,   // [seq, d_model]
-    d_q: DeviceTensor,          // [seq, d_model]
-    d_k: DeviceTensor,          // [seq, d_model]
-    d_v: DeviceTensor,          // [seq, d_model]
-    d_wo: DeviceTensor,         // [d_model, d_model]
-    d_bo: DeviceTensor,         // [d_model]
-    d_wq: DeviceTensor,         // [d_model, d_model]
-    d_bq: DeviceTensor,         // [d_model]
-    d_wk: DeviceTensor,         // [d_model, d_model]
-    d_bk: DeviceTensor,         // [d_model]
-    d_wv: DeviceTensor,         // [d_model, d_model]
-    d_bv: DeviceTensor,         // [d_model]
-    d_ln1_out: DeviceTensor,    // [seq, d_model]
-    d_ln1_gamma: DeviceTensor,  // [d_model]
-    d_ln1_beta: DeviceTensor,   // [d_model]
+    d_proj_out: DeviceTensor,  // [seq, d_model]
+    d_attn_out: DeviceTensor,  // [seq, d_model]
+    d_q: DeviceTensor,         // [seq, d_model]
+    d_k: DeviceTensor,         // [seq, d_model]
+    d_v: DeviceTensor,         // [seq, d_model]
+    d_wo: DeviceTensor,        // [d_model, d_model]
+    d_bo: DeviceTensor,        // [d_model]
+    d_wq: DeviceTensor,        // [d_model, d_model]
+    d_bq: DeviceTensor,        // [d_model]
+    d_wk: DeviceTensor,        // [d_model, d_model]
+    d_bk: DeviceTensor,        // [d_model]
+    d_wv: DeviceTensor,        // [d_model, d_model]
+    d_bv: DeviceTensor,        // [d_model]
+    d_ln1_out: DeviceTensor,   // [seq, d_model]
+    d_ln1_gamma: DeviceTensor, // [d_model]
+    d_ln1_beta: DeviceTensor,  // [d_model]
 }
 
 /// AdamW moment buffers for one parameter tensor.
@@ -115,27 +121,27 @@ pub struct StaticGPT2 {
     h_target_u32: Vec<u32>,
 
     // Global weights
-    tok_emb: DeviceTensor,      // [vocab_size, d_model]
-    pos_emb: DeviceTensor,      // [seq_len, d_model]
-    ln_f_gamma: DeviceTensor,   // [d_model]
-    ln_f_beta: DeviceTensor,    // [d_model]
-    lm_head: DeviceTensor,      // [vocab_size, d_model]
+    tok_emb: DeviceTensor,    // [vocab_size, d_model]
+    pos_emb: DeviceTensor,    // [seq_len, d_model]
+    ln_f_gamma: DeviceTensor, // [d_model]
+    ln_f_beta: DeviceTensor,  // [d_model]
+    lm_head: DeviceTensor,    // [vocab_size, d_model]
 
     // Per-layer weights
     layers: Vec<LayerWeights>,
 
     // Forward activation buffers
-    tok_out: DeviceTensor,      // [seq, d_model]
-    pos_out: DeviceTensor,      // [seq, d_model]
-    x_in: Vec<DeviceTensor>,    // [n_layers+1][seq, d_model] — x entering each layer + final
+    tok_out: DeviceTensor,   // [seq, d_model]
+    pos_out: DeviceTensor,   // [seq, d_model]
+    x_in: Vec<DeviceTensor>, // [n_layers+1][seq, d_model] — x entering each layer + final
     layer_acts: Vec<LayerActivations>,
-    ln_f_out: DeviceTensor,     // [seq, d_model]
-    ln_f_mean: DeviceTensor,    // [seq]
-    ln_f_rstd: DeviceTensor,    // [seq]
-    logits: DeviceTensor,       // [seq, vocab_size]
-    loss_tensor: DeviceTensor,  // [1]
-    probs: DeviceTensor,        // [seq, vocab_size]
-    grad_one: DeviceTensor,     // [1]
+    ln_f_out: DeviceTensor,    // [seq, d_model]
+    ln_f_mean: DeviceTensor,   // [seq]
+    ln_f_rstd: DeviceTensor,   // [seq]
+    logits: DeviceTensor,      // [seq, vocab_size]
+    loss_tensor: DeviceTensor, // [1]
+    probs: DeviceTensor,       // [seq, vocab_size]
+    grad_one: DeviceTensor,    // [1]
 
     // Pinned host buffer for async loss D2H (no CPU-GPU sync inside step)
     pinned_loss: darkforest_cuda::memory::PinnedBuffer,
@@ -146,18 +152,24 @@ pub struct StaticGPT2 {
     d_ln_f_gamma: DeviceTensor, // [d_model]
     d_ln_f_beta: DeviceTensor,  // [d_model]
     layer_grads: Vec<LayerGrads>,
-    d_tok_emb: DeviceTensor,    // [vocab_size, d_model]
-    d_pos_emb: DeviceTensor,    // [seq_len, d_model]
+    d_tok_emb: DeviceTensor, // [vocab_size, d_model]
+    d_pos_emb: DeviceTensor, // [seq_len, d_model]
 
     // Reusable dx residual accumulator
-    dx_comb: DeviceTensor,      // [seq, d_model]
+    dx_comb: DeviceTensor, // [seq, d_model]
 
     // AdamW state
     step_count: usize,
-    lr: f32, beta1: f32, beta2: f32, eps: f32, wd: f32,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    wd: f32,
     // moment buffers — one Moments per weight tensor
-    m_tok: Moments, m_pos: Moments,
-    m_ln_f_gamma: Moments, m_ln_f_beta: Moments,
+    m_tok: Moments,
+    m_pos: Moments,
+    m_ln_f_gamma: Moments,
+    m_ln_f_beta: Moments,
     m_lm_head: Moments,
     layer_moments: Vec<LayerMoments>,
 
@@ -171,14 +183,22 @@ pub struct StaticGPT2 {
 /// AdamW moment buffers for all weights in one transformer layer.
 #[cfg(feature = "cuda")]
 struct LayerMoments {
-    ln1_gamma: Moments, ln1_beta: Moments,
-    wq: Moments, bq: Moments,
-    wk: Moments, bk: Moments,
-    wv: Moments, bv: Moments,
-    wo: Moments, bo: Moments,
-    ln2_gamma: Moments, ln2_beta: Moments,
-    w1: Moments, b1: Moments,
-    w2: Moments, b2: Moments,
+    ln1_gamma: Moments,
+    ln1_beta: Moments,
+    wq: Moments,
+    bq: Moments,
+    wk: Moments,
+    bk: Moments,
+    wv: Moments,
+    bv: Moments,
+    wo: Moments,
+    bo: Moments,
+    ln2_gamma: Moments,
+    ln2_beta: Moments,
+    w1: Moments,
+    b1: Moments,
+    w2: Moments,
+    b2: Moments,
 }
 
 #[cfg(feature = "cuda")]
@@ -250,31 +270,51 @@ impl StaticGPT2 {
             let w2 = randn_device(vec![d_model, d_ff], std_ff)?;
             let b2 = DeviceTensor::zeros(vec![d_model])?;
             let ln1_gamma = DeviceTensor::ones(vec![d_model])?;
-            let ln1_beta  = DeviceTensor::zeros(vec![d_model])?;
+            let ln1_beta = DeviceTensor::zeros(vec![d_model])?;
             let ln2_gamma = DeviceTensor::ones(vec![d_model])?;
-            let ln2_beta  = DeviceTensor::zeros(vec![d_model])?;
+            let ln2_beta = DeviceTensor::zeros(vec![d_model])?;
 
             layer_moments.push(LayerMoments {
                 ln1_gamma: Moments::for_tensor(&ln1_gamma)?,
-                ln1_beta:  Moments::for_tensor(&ln1_beta)?,
-                wq: Moments::for_tensor(&wq)?,  bq: Moments::for_tensor(&bq)?,
-                wk: Moments::for_tensor(&wk)?,  bk: Moments::for_tensor(&bk)?,
-                wv: Moments::for_tensor(&wv)?,  bv: Moments::for_tensor(&bv)?,
-                wo: Moments::for_tensor(&wo)?,  bo: Moments::for_tensor(&bo)?,
+                ln1_beta: Moments::for_tensor(&ln1_beta)?,
+                wq: Moments::for_tensor(&wq)?,
+                bq: Moments::for_tensor(&bq)?,
+                wk: Moments::for_tensor(&wk)?,
+                bk: Moments::for_tensor(&bk)?,
+                wv: Moments::for_tensor(&wv)?,
+                bv: Moments::for_tensor(&bv)?,
+                wo: Moments::for_tensor(&wo)?,
+                bo: Moments::for_tensor(&bo)?,
                 ln2_gamma: Moments::for_tensor(&ln2_gamma)?,
-                ln2_beta:  Moments::for_tensor(&ln2_beta)?,
-                w1: Moments::for_tensor(&w1)?,  b1: Moments::for_tensor(&b1)?,
-                w2: Moments::for_tensor(&w2)?,  b2: Moments::for_tensor(&b2)?,
+                ln2_beta: Moments::for_tensor(&ln2_beta)?,
+                w1: Moments::for_tensor(&w1)?,
+                b1: Moments::for_tensor(&b1)?,
+                w2: Moments::for_tensor(&w2)?,
+                b2: Moments::for_tensor(&b2)?,
             });
 
             layers.push(LayerWeights {
-                ln1_gamma, ln1_beta, wq, bq, wk, bk, wv, bv, wo, bo,
-                ln2_gamma, ln2_beta, w1, b1, w2, b2,
+                ln1_gamma,
+                ln1_beta,
+                wq,
+                bq,
+                wk,
+                bk,
+                wv,
+                bv,
+                wo,
+                bo,
+                ln2_gamma,
+                ln2_beta,
+                w1,
+                b1,
+                w2,
+                b2,
             });
 
             // Pre-allocate activation buffers for this layer
             layer_acts.push(LayerActivations {
-                ln1_out:  DeviceTensor::zeros(vec![seq_len, d_model])?,
+                ln1_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 ln1_mean: DeviceTensor::zeros(vec![seq_len])?,
                 ln1_rstd: DeviceTensor::zeros(vec![seq_len])?,
                 q: DeviceTensor::zeros(vec![seq_len, d_model])?,
@@ -282,30 +322,30 @@ impl StaticGPT2 {
                 v: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 attn_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 proj_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
-                x_mid:    DeviceTensor::zeros(vec![seq_len, d_model])?,
-                ln2_out:  DeviceTensor::zeros(vec![seq_len, d_model])?,
+                x_mid: DeviceTensor::zeros(vec![seq_len, d_model])?,
+                ln2_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 ln2_mean: DeviceTensor::zeros(vec![seq_len])?,
                 ln2_rstd: DeviceTensor::zeros(vec![seq_len])?,
-                mlp_h:    DeviceTensor::zeros(vec![seq_len, d_ff])?,
-                mlp_a:    DeviceTensor::zeros(vec![seq_len, d_ff])?,
-                mlp_out:  DeviceTensor::zeros(vec![seq_len, d_model])?,
+                mlp_h: DeviceTensor::zeros(vec![seq_len, d_ff])?,
+                mlp_a: DeviceTensor::zeros(vec![seq_len, d_ff])?,
+                mlp_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             });
 
             // Pre-allocate gradient buffers
             layer_grads.push(LayerGrads {
-                dx:          DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_mlp_out:   DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_mlp_a:     DeviceTensor::zeros(vec![seq_len, d_ff])?,
-                d_mlp_h:     DeviceTensor::zeros(vec![seq_len, d_ff])?,
-                d_w2:        DeviceTensor::zeros(vec![d_model, d_ff])?,
-                d_b2:        DeviceTensor::zeros(vec![d_model])?,
-                d_w1:        DeviceTensor::zeros(vec![d_ff, d_model])?,
-                d_b1:        DeviceTensor::zeros(vec![d_ff])?,
-                d_ln2_out:   DeviceTensor::zeros(vec![seq_len, d_model])?,
+                dx: DeviceTensor::zeros(vec![seq_len, d_model])?,
+                d_mlp_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
+                d_mlp_a: DeviceTensor::zeros(vec![seq_len, d_ff])?,
+                d_mlp_h: DeviceTensor::zeros(vec![seq_len, d_ff])?,
+                d_w2: DeviceTensor::zeros(vec![d_model, d_ff])?,
+                d_b2: DeviceTensor::zeros(vec![d_model])?,
+                d_w1: DeviceTensor::zeros(vec![d_ff, d_model])?,
+                d_b1: DeviceTensor::zeros(vec![d_ff])?,
+                d_ln2_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 d_ln2_gamma: DeviceTensor::zeros(vec![d_model])?,
-                d_ln2_beta:  DeviceTensor::zeros(vec![d_model])?,
-                d_proj_out:  DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_attn_out:  DeviceTensor::zeros(vec![seq_len, d_model])?,
+                d_ln2_beta: DeviceTensor::zeros(vec![d_model])?,
+                d_proj_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
+                d_attn_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 d_q: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 d_k: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 d_v: DeviceTensor::zeros(vec![seq_len, d_model])?,
@@ -317,14 +357,14 @@ impl StaticGPT2 {
                 d_bk: DeviceTensor::zeros(vec![d_model])?,
                 d_wv: DeviceTensor::zeros(vec![d_model, d_model])?,
                 d_bv: DeviceTensor::zeros(vec![d_model])?,
-                d_ln1_out:   DeviceTensor::zeros(vec![seq_len, d_model])?,
+                d_ln1_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 d_ln1_gamma: DeviceTensor::zeros(vec![d_model])?,
-                d_ln1_beta:  DeviceTensor::zeros(vec![d_model])?,
+                d_ln1_beta: DeviceTensor::zeros(vec![d_model])?,
             });
 
-            attn_contexts.push(std::sync::Arc::new(
-                AttentionContext::new(n_heads, seq_len, d_head)?
-            ));
+            attn_contexts.push(std::sync::Arc::new(AttentionContext::new(
+                n_heads, seq_len, d_head,
+            )?));
         }
 
         // x buffers entering each layer + after final ln
@@ -334,52 +374,84 @@ impl StaticGPT2 {
         }
 
         let allocator = std::sync::Arc::new(darkforest_cuda::memory::GpuAllocator);
-        let d_input_indices = darkforest_cuda::memory::CudaBuffer::new(seq_len * std::mem::size_of::<u32>(), allocator.clone())?;
-        let d_pos_indices = darkforest_cuda::memory::CudaBuffer::new(seq_len * std::mem::size_of::<u32>(), allocator.clone())?;
-        let d_target_indices = darkforest_cuda::memory::CudaBuffer::new(seq_len * std::mem::size_of::<u32>(), allocator)?;
+        let d_input_indices = darkforest_cuda::memory::CudaBuffer::new(
+            seq_len * std::mem::size_of::<u32>(),
+            allocator.clone(),
+        )?;
+        let d_pos_indices = darkforest_cuda::memory::CudaBuffer::new(
+            seq_len * std::mem::size_of::<u32>(),
+            allocator.clone(),
+        )?;
+        let d_target_indices = darkforest_cuda::memory::CudaBuffer::new(
+            seq_len * std::mem::size_of::<u32>(),
+            allocator,
+        )?;
 
         // Preload pos indices [0, 1, ..., seq_len-1] once
         let pos_data: Vec<u32> = (0..seq_len as u32).collect();
-        d_pos_indices.upload_bytes(pos_data.as_ptr() as *const u8, seq_len * std::mem::size_of::<u32>())?;
+        d_pos_indices.upload_bytes(
+            pos_data.as_ptr() as *const u8,
+            seq_len * std::mem::size_of::<u32>(),
+        )?;
 
-        let m_tok      = Moments::for_tensor(&tok_emb)?;
-        let m_pos      = Moments::for_tensor(&pos_emb)?;
+        let m_tok = Moments::for_tensor(&tok_emb)?;
+        let m_pos = Moments::for_tensor(&pos_emb)?;
         let m_ln_f_gamma = Moments::for_tensor(&ln_f_gamma)?;
-        let m_ln_f_beta  = Moments::for_tensor(&ln_f_beta)?;
-        let m_lm_head    = Moments::for_tensor(&lm_head)?;
+        let m_ln_f_beta = Moments::for_tensor(&ln_f_beta)?;
+        let m_lm_head = Moments::for_tensor(&lm_head)?;
 
         Ok(Self {
-            vocab_size, d_model, n_heads, n_layers, d_ff, seq_len,
-            d_input_indices, d_pos_indices, d_target_indices,
-            tok_emb, pos_emb, ln_f_gamma, ln_f_beta, lm_head,
-            layers, layer_acts,
+            vocab_size,
+            d_model,
+            n_heads,
+            n_layers,
+            d_ff,
+            seq_len,
+            d_input_indices,
+            d_pos_indices,
+            d_target_indices,
+            tok_emb,
+            pos_emb,
+            ln_f_gamma,
+            ln_f_beta,
+            lm_head,
+            layers,
+            layer_acts,
             tok_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             pos_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             x_in,
-            ln_f_out:    DeviceTensor::zeros(vec![seq_len, d_model])?,
-            ln_f_mean:   DeviceTensor::zeros(vec![seq_len])?,
-            ln_f_rstd:   DeviceTensor::zeros(vec![seq_len])?,
-            logits:      DeviceTensor::zeros(vec![seq_len, vocab_size])?,
+            ln_f_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            ln_f_mean: DeviceTensor::zeros(vec![seq_len])?,
+            ln_f_rstd: DeviceTensor::zeros(vec![seq_len])?,
+            logits: DeviceTensor::zeros(vec![seq_len, vocab_size])?,
             loss_tensor: DeviceTensor::zeros(vec![1])?,
-            probs:       DeviceTensor::zeros(vec![seq_len, vocab_size])?,
-            grad_one:    DeviceTensor::ones(vec![1])?,
-            d_logits:    DeviceTensor::zeros(vec![seq_len, vocab_size])?,
-            d_lm_head:   DeviceTensor::zeros(vec![vocab_size, d_model])?,
-            d_ln_f_out:  DeviceTensor::zeros(vec![seq_len, d_model])?,
+            probs: DeviceTensor::zeros(vec![seq_len, vocab_size])?,
+            grad_one: DeviceTensor::ones(vec![1])?,
+            d_logits: DeviceTensor::zeros(vec![seq_len, vocab_size])?,
+            d_lm_head: DeviceTensor::zeros(vec![vocab_size, d_model])?,
+            d_ln_f_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             d_ln_f_gamma: DeviceTensor::zeros(vec![d_model])?,
-            d_ln_f_beta:  DeviceTensor::zeros(vec![d_model])?,
+            d_ln_f_beta: DeviceTensor::zeros(vec![d_model])?,
             layer_grads,
-            d_tok_emb:   DeviceTensor::zeros(vec![vocab_size, d_model])?,
-            d_pos_emb:   DeviceTensor::zeros(vec![seq_len, d_model])?,
-            dx_comb:     DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_tok_emb: DeviceTensor::zeros(vec![vocab_size, d_model])?,
+            d_pos_emb: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            dx_comb: DeviceTensor::zeros(vec![seq_len, d_model])?,
             step_count: 0,
-            lr, beta1: 0.9, beta2: 0.95, eps: 1e-8, wd: 0.1,
-            m_tok, m_pos, m_ln_f_gamma, m_ln_f_beta, m_lm_head,
+            lr,
+            beta1: 0.9,
+            beta2: 0.95,
+            eps: 1e-8,
+            wd: 0.1,
+            m_tok,
+            m_pos,
+            m_ln_f_gamma,
+            m_ln_f_beta,
+            m_lm_head,
             layer_moments,
             attn_contexts,
             pinned_loss: darkforest_cuda::memory::PinnedBuffer::new(std::mem::size_of::<f32>())?,
             // Pre-allocated host staging buffers — avoid Vec alloc per step
-            h_input_u32:  vec![0u32; seq_len],
+            h_input_u32: vec![0u32; seq_len],
             h_target_u32: vec![0u32; seq_len],
             graph_exec: None,
         })
@@ -388,42 +460,65 @@ impl StaticGPT2 {
     /// Run one complete training step: forward → loss → backward → AdamW update.
     /// Returns the scalar cross-entropy loss value.
     pub fn step(&mut self, input_tokens: &[usize], target_tokens: &[usize]) -> Result<f32> {
-        assert_eq!(input_tokens.len(), self.seq_len);
-        assert_eq!(target_tokens.len(), self.seq_len);
+        if input_tokens.len() != self.seq_len || target_tokens.len() != self.seq_len {
+            return Err(anyhow!(
+                "StaticGPT2 context length violation in step(): expected exactly {} tokens, got {} input and {} target tokens.",
+                self.seq_len,
+                input_tokens.len(),
+                target_tokens.len()
+            ));
+        }
         self.step_count += 1;
 
-        for (i, &tok) in input_tokens.iter().enumerate() { self.h_input_u32[i] = tok as u32; }
-        for (i, &tok) in target_tokens.iter().enumerate() { self.h_target_u32[i] = tok as u32; }
-        self.d_input_indices.upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
-        self.d_target_indices.upload_bytes(self.h_target_u32.as_ptr() as *const u8, self.seq_len * 4)?;
+        for (i, &tok) in input_tokens.iter().enumerate() {
+            self.h_input_u32[i] = tok as u32;
+        }
+        for (i, &tok) in target_tokens.iter().enumerate() {
+            self.h_target_u32[i] = tok as u32;
+        }
+        self.d_input_indices
+            .upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
+        self.d_target_indices
+            .upload_bytes(self.h_target_u32.as_ptr() as *const u8, self.seq_len * 4)?;
 
         self.step_inner()
     }
 
     pub fn step_graph(&mut self, input_tokens: &[usize], target_tokens: &[usize]) -> Result<f32> {
-        assert_eq!(input_tokens.len(), self.seq_len);
-        assert_eq!(target_tokens.len(), self.seq_len);
+        if input_tokens.len() != self.seq_len || target_tokens.len() != self.seq_len {
+            return Err(anyhow!(
+                "StaticGPT2 context length violation: expected exactly {} tokens (pre-allocated static horizon), got {} input and {} target tokens. Reallocate StaticGPT2 to change sequence horizon.",
+                self.seq_len,
+                input_tokens.len(),
+                target_tokens.len()
+            ));
+        }
         self.step_count += 1;
 
-        for (i, &tok) in input_tokens.iter().enumerate() { self.h_input_u32[i] = tok as u32; }
-        for (i, &tok) in target_tokens.iter().enumerate() { self.h_target_u32[i] = tok as u32; }
-        self.d_input_indices.upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
-        self.d_target_indices.upload_bytes(self.h_target_u32.as_ptr() as *const u8, self.seq_len * 4)?;
+        for (i, &tok) in input_tokens.iter().enumerate() {
+            self.h_input_u32[i] = tok as u32;
+        }
+        for (i, &tok) in target_tokens.iter().enumerate() {
+            self.h_target_u32[i] = tok as u32;
+        }
+        self.d_input_indices
+            .upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
+        self.d_target_indices
+            .upload_bytes(self.h_target_u32.as_ptr() as *const u8, self.seq_len * 4)?;
 
         if self.graph_exec.is_none() {
             if self.step_count == 1 {
                 // Warm up on step 1 to initialize cuBLAS handles
                 self.step_inner()?;
             } else {
-                let graph = darkforest_cuda::CudaGraphExec::capture(|| {
-                    self.step_inner().map(|_| ())
-                })?;
+                let graph =
+                    darkforest_cuda::CudaGraphExec::capture(|| self.step_inner().map(|_| ()))?;
                 self.graph_exec = Some(graph);
             }
         } else {
             self.graph_exec.as_ref().unwrap().launch()?;
         }
-        
+
         Ok(self.pinned_loss.read_f32())
     }
 
@@ -434,8 +529,18 @@ impl StaticGPT2 {
         let scale = (self.d_model as f32 / self.n_heads as f32).powf(-0.5);
 
         // Embeddings
-        DeviceTensor::embedding_lookup_device_indices(&self.d_input_indices, self.seq_len, &self.tok_emb, &mut self.tok_out)?;
-        DeviceTensor::embedding_lookup_device_indices(&self.d_pos_indices, self.seq_len, &self.pos_emb, &mut self.pos_out)?;
+        DeviceTensor::embedding_lookup_device_indices(
+            &self.d_input_indices,
+            self.seq_len,
+            &self.tok_emb,
+            &mut self.tok_out,
+        )?;
+        DeviceTensor::embedding_lookup_device_indices(
+            &self.d_pos_indices,
+            self.seq_len,
+            &self.pos_emb,
+            &mut self.pos_out,
+        )?;
         // x[0] = tok + pos
         self.tok_out.add_into(&self.pos_out, &mut self.x_in[0])?;
 
@@ -469,7 +574,8 @@ impl StaticGPT2 {
             )?;
 
             // Output projection + first residual
-            la.attn_out.linear_into(&lw.wo, Some(&lw.bo), &mut la.proj_out)?;
+            la.attn_out
+                .linear_into(&lw.wo, Some(&lw.bo), &mut la.proj_out)?;
             self.x_in[l].add_into(&la.proj_out, &mut la.x_mid)?;
 
             // LayerNorm 2
@@ -482,9 +588,11 @@ impl StaticGPT2 {
             )?;
 
             // MLP: linear → gelu → linear
-            la.ln2_out.linear_into(&lw.w1, Some(&lw.b1), &mut la.mlp_h)?;
+            la.ln2_out
+                .linear_into(&lw.w1, Some(&lw.b1), &mut la.mlp_h)?;
             la.mlp_h.gelu_into(&mut la.mlp_a)?;
-            la.mlp_a.linear_into(&lw.w2, Some(&lw.b2), &mut la.mlp_out)?;
+            la.mlp_a
+                .linear_into(&lw.w2, Some(&lw.b2), &mut la.mlp_out)?;
 
             // Second residual
             la.x_mid.add_into(&la.mlp_out, &mut self.x_in[l + 1])?;
@@ -498,7 +606,8 @@ impl StaticGPT2 {
             &mut self.ln_f_mean,
             &mut self.ln_f_rstd,
         )?;
-        self.ln_f_out.linear_into(&self.lm_head, None, &mut self.logits)?;
+        self.ln_f_out
+            .linear_into(&self.lm_head, None, &mut self.logits)?;
 
         // Cross-entropy loss (in-place zero allocation)
         DeviceTensor::cross_entropy_device_targets(
@@ -507,7 +616,8 @@ impl StaticGPT2 {
             &mut self.probs,
             &mut self.loss_tensor,
         )?;
-        self.loss_tensor.async_download_scalar_f32(&self.pinned_loss)?;
+        self.loss_tensor
+            .async_download_scalar_f32(&self.pinned_loss)?;
 
         // ---------------------------------------------------------------
         // BACKWARD PASS
@@ -662,7 +772,6 @@ impl StaticGPT2 {
             self.dx_comb.add_inplace(&lg.dx)?;
         }
 
-
         // Embedding backward — self.dx_comb holds d(x_in[0]) after transformer loop
         DeviceTensor::embedding_backward_device_indices(
             &self.d_input_indices,
@@ -692,22 +801,24 @@ impl StaticGPT2 {
 
         macro_rules! update {
             ($p:expr, $g:expr, $mom:expr) => {
-                DeviceTensor::adamw_update(&$p, &$mom.m, &$mom.v, &$g, lr, b1, b2, eps, wd, bc1, bc2)?;
+                DeviceTensor::adamw_update(
+                    &$p, &$mom.m, &$mom.v, &$g, lr, b1, b2, eps, wd, bc1, bc2,
+                )?;
             };
         }
 
-        update!(self.tok_emb,    self.d_tok_emb,    self.m_tok);
-        update!(self.pos_emb,    self.d_pos_emb,    self.m_pos);
+        update!(self.tok_emb, self.d_tok_emb, self.m_tok);
+        update!(self.pos_emb, self.d_pos_emb, self.m_pos);
         update!(self.ln_f_gamma, self.d_ln_f_gamma, self.m_ln_f_gamma);
-        update!(self.ln_f_beta,  self.d_ln_f_beta,  self.m_ln_f_beta);
-        update!(self.lm_head,    self.d_lm_head,    self.m_lm_head);
+        update!(self.ln_f_beta, self.d_ln_f_beta, self.m_ln_f_beta);
+        update!(self.lm_head, self.d_lm_head, self.m_lm_head);
 
         for l in 0..self.n_layers {
             let lw = &mut self.layers[l];
             let lg = &self.layer_grads[l];
             let lm = &mut self.layer_moments[l];
             update!(lw.ln1_gamma, lg.d_ln1_gamma, lm.ln1_gamma);
-            update!(lw.ln1_beta,  lg.d_ln1_beta,  lm.ln1_beta);
+            update!(lw.ln1_beta, lg.d_ln1_beta, lm.ln1_beta);
             update!(lw.wq, lg.d_wq, lm.wq);
             update!(lw.bq, lg.d_bq, lm.bq);
             update!(lw.wk, lg.d_wk, lm.wk);
@@ -717,7 +828,7 @@ impl StaticGPT2 {
             update!(lw.wo, lg.d_wo, lm.wo);
             update!(lw.bo, lg.d_bo, lm.bo);
             update!(lw.ln2_gamma, lg.d_ln2_gamma, lm.ln2_gamma);
-            update!(lw.ln2_beta,  lg.d_ln2_beta,  lm.ln2_beta);
+            update!(lw.ln2_beta, lg.d_ln2_beta, lm.ln2_beta);
             update!(lw.w1, lg.d_w1, lm.w1);
             update!(lw.b1, lg.d_b1, lm.b1);
             update!(lw.w2, lg.d_w2, lm.w2);
@@ -731,38 +842,62 @@ impl StaticGPT2 {
     /// so we can isolate which exact operation takes the most wall-clock time.
     /// Do NOT call this during training — it is purely for profiling.
     pub fn profile_step(&mut self, input_tokens: &[usize], target_tokens: &[usize]) -> Result<()> {
-        use std::time::Instant;
         use darkforest_cuda::DeviceTensor;
+        use std::time::Instant;
 
         assert_eq!(input_tokens.len(), self.seq_len);
         assert_eq!(target_tokens.len(), self.seq_len);
         self.step_count += 1;
 
-        for (i, &tok) in input_tokens.iter().enumerate() { self.h_input_u32[i] = tok as u32; }
-        for (i, &tok) in target_tokens.iter().enumerate() { self.h_target_u32[i] = tok as u32; }
+        for (i, &tok) in input_tokens.iter().enumerate() {
+            self.h_input_u32[i] = tok as u32;
+        }
+        for (i, &tok) in target_tokens.iter().enumerate() {
+            self.h_target_u32[i] = tok as u32;
+        }
 
         let t = Instant::now();
-        self.d_input_indices.upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
-        self.d_target_indices.upload_bytes(self.h_target_u32.as_ptr() as *const u8, self.seq_len * 4)?;
+        self.d_input_indices
+            .upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
+        self.d_target_indices
+            .upload_bytes(self.h_target_u32.as_ptr() as *const u8, self.seq_len * 4)?;
         crate::cuda_sync()?;
-        println!("  {:50} {:7.3} ms", "H2D upload indices", t.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "  {:50} {:7.3} ms",
+            "H2D upload indices",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
 
         macro_rules! prof {
             ($label:expr, $body:expr) => {{
                 let t = Instant::now();
                 $body;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", $label, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    $label,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }};
         }
 
         let scale = (self.d_model as f32 / self.n_heads as f32).powf(-0.5);
 
         prof!("embedding lookup tok", {
-            DeviceTensor::embedding_lookup_device_indices(&self.d_input_indices, self.seq_len, &self.tok_emb, &mut self.tok_out)?;
+            DeviceTensor::embedding_lookup_device_indices(
+                &self.d_input_indices,
+                self.seq_len,
+                &self.tok_emb,
+                &mut self.tok_out,
+            )?;
         });
         prof!("embedding lookup pos", {
-            DeviceTensor::embedding_lookup_device_indices(&self.d_pos_indices, self.seq_len, &self.pos_emb, &mut self.pos_out)?;
+            DeviceTensor::embedding_lookup_device_indices(
+                &self.d_pos_indices,
+                self.seq_len,
+                &self.pos_emb,
+                &mut self.pos_out,
+            )?;
         });
         prof!("tok + pos add", {
             self.tok_out.add_into(&self.pos_out, &mut self.x_in[0])?;
@@ -772,100 +907,196 @@ impl StaticGPT2 {
             let lw = &self.layers[l];
             let la = &mut self.layer_acts[l];
             let label_ln1 = format!("L{l} layernorm1");
-            let label_q   = format!("L{l} Q proj linear");
-            let label_k   = format!("L{l} K proj linear");
-            let label_v   = format!("L{l} V proj linear");
+            let label_q = format!("L{l} Q proj linear");
+            let label_k = format!("L{l} K proj linear");
+            let label_v = format!("L{l} V proj linear");
             let label_attn = format!("L{l} attention fwd");
-            let label_op  = format!("L{l} O proj + residual");
+            let label_op = format!("L{l} O proj + residual");
             let label_ln2 = format!("L{l} layernorm2");
-            let label_mu  = format!("L{l} MLP up linear");
-            let label_mg  = format!("L{l} MLP gelu");
-            let label_md  = format!("L{l} MLP down + residual");
+            let label_mu = format!("L{l} MLP up linear");
+            let label_mg = format!("L{l} MLP gelu");
+            let label_md = format!("L{l} MLP down + residual");
 
             {
                 let t = Instant::now();
-                self.x_in[l].layernorm_into(Some(&lw.ln1_gamma), Some(&lw.ln1_beta), &mut la.ln1_out, &mut la.ln1_mean, &mut la.ln1_rstd)?;
+                self.x_in[l].layernorm_into(
+                    Some(&lw.ln1_gamma),
+                    Some(&lw.ln1_beta),
+                    &mut la.ln1_out,
+                    &mut la.ln1_mean,
+                    &mut la.ln1_rstd,
+                )?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_ln1, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_ln1,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
                 la.ln1_out.linear_into(&lw.wq, Some(&lw.bq), &mut la.q)?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_q, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_q,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
                 la.ln1_out.linear_into(&lw.wk, Some(&lw.bk), &mut la.k)?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_k, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_k,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
                 la.ln1_out.linear_into(&lw.wv, Some(&lw.bv), &mut la.v)?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_v, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_v,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
-                self.attn_contexts[l].forward_device_into(&la.q, &la.k, &la.v, scale, true, &mut la.attn_out)?;
+                self.attn_contexts[l].forward_device_into(
+                    &la.q,
+                    &la.k,
+                    &la.v,
+                    scale,
+                    true,
+                    &mut la.attn_out,
+                )?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_attn, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_attn,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
-                la.attn_out.linear_into(&lw.wo, Some(&lw.bo), &mut la.proj_out)?;
+                la.attn_out
+                    .linear_into(&lw.wo, Some(&lw.bo), &mut la.proj_out)?;
                 self.x_in[l].add_into(&la.proj_out, &mut la.x_mid)?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_op, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_op,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
-                la.x_mid.layernorm_into(Some(&lw.ln2_gamma), Some(&lw.ln2_beta), &mut la.ln2_out, &mut la.ln2_mean, &mut la.ln2_rstd)?;
+                la.x_mid.layernorm_into(
+                    Some(&lw.ln2_gamma),
+                    Some(&lw.ln2_beta),
+                    &mut la.ln2_out,
+                    &mut la.ln2_mean,
+                    &mut la.ln2_rstd,
+                )?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_ln2, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_ln2,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
-                la.ln2_out.linear_into(&lw.w1, Some(&lw.b1), &mut la.mlp_h)?;
+                la.ln2_out
+                    .linear_into(&lw.w1, Some(&lw.b1), &mut la.mlp_h)?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_mu, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_mu,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
                 la.mlp_h.gelu_into(&mut la.mlp_a)?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_mg, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_mg,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
             {
                 let t = Instant::now();
-                la.mlp_a.linear_into(&lw.w2, Some(&lw.b2), &mut la.mlp_out)?;
+                la.mlp_a
+                    .linear_into(&lw.w2, Some(&lw.b2), &mut la.mlp_out)?;
                 la.x_mid.add_into(&la.mlp_out, &mut self.x_in[l + 1])?;
                 crate::cuda_sync()?;
-                println!("  {:50} {:7.3} ms", label_md, t.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  {:50} {:7.3} ms",
+                    label_md,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
             }
         }
 
         prof!("final layernorm", {
-            self.x_in[self.n_layers].layernorm_into(Some(&self.ln_f_gamma), Some(&self.ln_f_beta), &mut self.ln_f_out, &mut self.ln_f_mean, &mut self.ln_f_rstd)?;
+            self.x_in[self.n_layers].layernorm_into(
+                Some(&self.ln_f_gamma),
+                Some(&self.ln_f_beta),
+                &mut self.ln_f_out,
+                &mut self.ln_f_mean,
+                &mut self.ln_f_rstd,
+            )?;
         });
         prof!("lm head linear", {
-            self.ln_f_out.linear_into(&self.lm_head, None, &mut self.logits)?;
+            self.ln_f_out
+                .linear_into(&self.lm_head, None, &mut self.logits)?;
         });
         prof!("cross-entropy forward", {
-            DeviceTensor::cross_entropy_device_targets(&self.logits, &self.d_target_indices, &mut self.probs, &mut self.loss_tensor)?;
-            self.loss_tensor.async_download_scalar_f32(&self.pinned_loss)?;
+            DeviceTensor::cross_entropy_device_targets(
+                &self.logits,
+                &self.d_target_indices,
+                &mut self.probs,
+                &mut self.loss_tensor,
+            )?;
+            self.loss_tensor
+                .async_download_scalar_f32(&self.pinned_loss)?;
         });
 
         // --- BACKWARD ---
         prof!("cross-entropy backward", {
-            DeviceTensor::cross_entropy_backward_device_targets(&self.probs, &self.d_target_indices, &self.grad_one, &mut self.d_logits)?;
+            DeviceTensor::cross_entropy_backward_device_targets(
+                &self.probs,
+                &self.d_target_indices,
+                &self.grad_one,
+                &mut self.d_logits,
+            )?;
         });
         prof!("lm head backward", {
-            DeviceTensor::linear_backward_into(&self.ln_f_out, &self.lm_head, &self.d_logits, &mut self.d_ln_f_out, &mut self.d_lm_head, None)?;
+            DeviceTensor::linear_backward_into(
+                &self.ln_f_out,
+                &self.lm_head,
+                &self.d_logits,
+                &mut self.d_ln_f_out,
+                &mut self.d_lm_head,
+                None,
+            )?;
         });
         prof!("final layernorm backward", {
-            DeviceTensor::layernorm_backward_into(&self.d_ln_f_out, &self.x_in[self.n_layers], Some(&self.ln_f_gamma), &self.ln_f_mean, &self.ln_f_rstd, &mut self.dx_comb, Some(&mut self.d_ln_f_gamma), Some(&mut self.d_ln_f_beta))?;
+            DeviceTensor::layernorm_backward_into(
+                &self.d_ln_f_out,
+                &self.x_in[self.n_layers],
+                Some(&self.ln_f_gamma),
+                &self.ln_f_mean,
+                &self.ln_f_rstd,
+                &mut self.dx_comb,
+                Some(&mut self.d_ln_f_gamma),
+                Some(&mut self.d_ln_f_beta),
+            )?;
         });
 
         for l in (0..self.n_layers).rev() {
@@ -879,27 +1110,115 @@ impl StaticGPT2 {
             lg.dx.copy_from(&self.dx_comb)?;
             let d_x_mid_from_above = &mut lg.dx;
 
-            DeviceTensor::linear_backward_into(&la.mlp_a, &lw.w2, &lg.d_mlp_out, &mut lg.d_mlp_a, &mut lg.d_w2, Some(&mut lg.d_b2))?;
+            DeviceTensor::linear_backward_into(
+                &la.mlp_a,
+                &lw.w2,
+                &lg.d_mlp_out,
+                &mut lg.d_mlp_a,
+                &mut lg.d_w2,
+                Some(&mut lg.d_b2),
+            )?;
             la.mlp_h.gelu_backward_into(&lg.d_mlp_a, &mut lg.d_mlp_h)?;
-            DeviceTensor::linear_backward_into(&la.ln2_out, &lw.w1, &lg.d_mlp_h, &mut lg.d_ln2_out, &mut lg.d_w1, Some(&mut lg.d_b1))?;
-            DeviceTensor::layernorm_backward_into(&lg.d_ln2_out, &la.x_mid, Some(&lw.ln2_gamma), &la.ln2_mean, &la.ln2_rstd, &mut self.dx_comb, Some(&mut lg.d_ln2_gamma), Some(&mut lg.d_ln2_beta))?;
+            DeviceTensor::linear_backward_into(
+                &la.ln2_out,
+                &lw.w1,
+                &lg.d_mlp_h,
+                &mut lg.d_ln2_out,
+                &mut lg.d_w1,
+                Some(&mut lg.d_b1),
+            )?;
+            DeviceTensor::layernorm_backward_into(
+                &lg.d_ln2_out,
+                &la.x_mid,
+                Some(&lw.ln2_gamma),
+                &la.ln2_mean,
+                &la.ln2_rstd,
+                &mut self.dx_comb,
+                Some(&mut lg.d_ln2_gamma),
+                Some(&mut lg.d_ln2_beta),
+            )?;
             d_x_mid_from_above.add_inplace(&self.dx_comb)?;
             lg.d_proj_out.copy_from(d_x_mid_from_above)?;
-            DeviceTensor::linear_backward_into(&la.attn_out, &lw.wo, &lg.d_proj_out, &mut lg.d_attn_out, &mut lg.d_wo, Some(&mut lg.d_bo))?;
-            self.attn_contexts[l].backward_device_into(&la.q, &la.k, &la.v, &lg.d_attn_out, scale, true, &mut lg.d_q, &mut lg.d_k, &mut lg.d_v)?;
-            DeviceTensor::linear_backward_into(&la.ln1_out, &lw.wq, &lg.d_q, &mut lg.d_ln1_out, &mut lg.d_wq, Some(&mut lg.d_bq))?;
-            DeviceTensor::linear_backward_accumulate_into(&la.ln1_out, &lw.wk, &lg.d_k, &mut lg.d_ln1_out, &mut lg.d_wk, Some(&mut lg.d_bk))?;
-            DeviceTensor::linear_backward_accumulate_into(&la.ln1_out, &lw.wv, &lg.d_v, &mut lg.d_ln1_out, &mut lg.d_wv, Some(&mut lg.d_bv))?;
-            DeviceTensor::layernorm_backward_into(&lg.d_ln1_out, &self.x_in[l], Some(&lw.ln1_gamma), &la.ln1_mean, &la.ln1_rstd, &mut self.dx_comb, Some(&mut lg.d_ln1_gamma), Some(&mut lg.d_ln1_beta))?;
+            DeviceTensor::linear_backward_into(
+                &la.attn_out,
+                &lw.wo,
+                &lg.d_proj_out,
+                &mut lg.d_attn_out,
+                &mut lg.d_wo,
+                Some(&mut lg.d_bo),
+            )?;
+            self.attn_contexts[l].backward_device_into(
+                &la.q,
+                &la.k,
+                &la.v,
+                &lg.d_attn_out,
+                scale,
+                true,
+                &mut lg.d_q,
+                &mut lg.d_k,
+                &mut lg.d_v,
+            )?;
+            DeviceTensor::linear_backward_into(
+                &la.ln1_out,
+                &lw.wq,
+                &lg.d_q,
+                &mut lg.d_ln1_out,
+                &mut lg.d_wq,
+                Some(&mut lg.d_bq),
+            )?;
+            DeviceTensor::linear_backward_accumulate_into(
+                &la.ln1_out,
+                &lw.wk,
+                &lg.d_k,
+                &mut lg.d_ln1_out,
+                &mut lg.d_wk,
+                Some(&mut lg.d_bk),
+            )?;
+            DeviceTensor::linear_backward_accumulate_into(
+                &la.ln1_out,
+                &lw.wv,
+                &lg.d_v,
+                &mut lg.d_ln1_out,
+                &mut lg.d_wv,
+                Some(&mut lg.d_bv),
+            )?;
+            DeviceTensor::layernorm_backward_into(
+                &lg.d_ln1_out,
+                &self.x_in[l],
+                Some(&lw.ln1_gamma),
+                &la.ln1_mean,
+                &la.ln1_rstd,
+                &mut self.dx_comb,
+                Some(&mut lg.d_ln1_gamma),
+                Some(&mut lg.d_ln1_beta),
+            )?;
             self.dx_comb.add_inplace(&lg.dx)?;
 
             crate::cuda_sync()?;
-            println!("  {:50} {:7.3} ms", label, t.elapsed().as_secs_f64() * 1000.0);
+            println!(
+                "  {:50} {:7.3} ms",
+                label,
+                t.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         prof!("embedding backward", {
-            DeviceTensor::embedding_backward_device_indices(&self.d_input_indices, self.seq_len, &self.dx_comb, &mut self.d_tok_emb, self.vocab_size, self.d_model)?;
-            DeviceTensor::embedding_backward_device_indices(&self.d_pos_indices, self.seq_len, &self.dx_comb, &mut self.d_pos_emb, self.seq_len, self.d_model)?;
+            DeviceTensor::embedding_backward_device_indices(
+                &self.d_input_indices,
+                self.seq_len,
+                &self.dx_comb,
+                &mut self.d_tok_emb,
+                self.vocab_size,
+                self.d_model,
+            )?;
+            DeviceTensor::embedding_backward_device_indices(
+                &self.d_pos_indices,
+                self.seq_len,
+                &self.dx_comb,
+                &mut self.d_pos_emb,
+                self.seq_len,
+                self.d_model,
+            )?;
         });
 
         // AdamW (just time one full update pass)
@@ -911,7 +1230,9 @@ impl StaticGPT2 {
         let bc2 = 1.0 - b2.powf(t_val);
         macro_rules! update {
             ($p:expr, $g:expr, $mom:expr) => {
-                DeviceTensor::adamw_update(&$p, &$mom.m, &$mom.v, &$g, lr, b1, b2, eps, wd, bc1, bc2)?;
+                DeviceTensor::adamw_update(
+                    &$p, &$mom.m, &$mom.v, &$g, lr, b1, b2, eps, wd, bc1, bc2,
+                )?;
             };
         }
         update!(self.tok_emb, self.d_tok_emb, self.m_tok);
@@ -925,22 +1246,31 @@ impl StaticGPT2 {
             let lm = &mut self.layer_moments[l];
             update!(lw.ln1_gamma, lg.d_ln1_gamma, lm.ln1_gamma);
             update!(lw.ln1_beta, lg.d_ln1_beta, lm.ln1_beta);
-            update!(lw.wq, lg.d_wq, lm.wq); update!(lw.bq, lg.d_bq, lm.bq);
-            update!(lw.wk, lg.d_wk, lm.wk); update!(lw.bk, lg.d_bk, lm.bk);
-            update!(lw.wv, lg.d_wv, lm.wv); update!(lw.bv, lg.d_bv, lm.bv);
-            update!(lw.wo, lg.d_wo, lm.wo); update!(lw.bo, lg.d_bo, lm.bo);
+            update!(lw.wq, lg.d_wq, lm.wq);
+            update!(lw.bq, lg.d_bq, lm.bq);
+            update!(lw.wk, lg.d_wk, lm.wk);
+            update!(lw.bk, lg.d_bk, lm.bk);
+            update!(lw.wv, lg.d_wv, lm.wv);
+            update!(lw.bv, lg.d_bv, lm.bv);
+            update!(lw.wo, lg.d_wo, lm.wo);
+            update!(lw.bo, lg.d_bo, lm.bo);
             update!(lw.ln2_gamma, lg.d_ln2_gamma, lm.ln2_gamma);
             update!(lw.ln2_beta, lg.d_ln2_beta, lm.ln2_beta);
-            update!(lw.w1, lg.d_w1, lm.w1); update!(lw.b1, lg.d_b1, lm.b1);
-            update!(lw.w2, lg.d_w2, lm.w2); update!(lw.b2, lg.d_b2, lm.b2);
+            update!(lw.w1, lg.d_w1, lm.w1);
+            update!(lw.b1, lg.d_b1, lm.b1);
+            update!(lw.w2, lg.d_w2, lm.w2);
+            update!(lw.b2, lg.d_b2, lm.b2);
         }
         crate::cuda_sync()?;
-        println!("  {:50} {:7.3} ms", "AdamW update (all params)", t_adamw.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "  {:50} {:7.3} ms",
+            "AdamW update (all params)",
+            t_adamw.elapsed().as_secs_f64() * 1000.0
+        );
 
         Ok(())
     }
 }
-
 
 /// Stub for non-CUDA builds (compile-time no-op).
 #[cfg(not(feature = "cuda"))]
@@ -948,8 +1278,17 @@ pub struct StaticGPT2;
 
 #[cfg(not(feature = "cuda"))]
 impl StaticGPT2 {
-    pub fn new(_vs: usize, _dm: usize, _nh: usize, _nl: usize, _df: usize, _sl: usize, _lr: f32)
-        -> Result<Self> { Ok(Self) }
+    pub fn new(
+        _vs: usize,
+        _dm: usize,
+        _nh: usize,
+        _nl: usize,
+        _df: usize,
+        _sl: usize,
+        _lr: f32,
+    ) -> Result<Self> {
+        Ok(Self)
+    }
     pub fn step(&mut self, _in: &[usize], _tgt: &[usize]) -> Result<f32> {
         Err(anyhow!("CUDA required for StaticGPT2"))
     }

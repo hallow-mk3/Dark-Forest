@@ -32,8 +32,5 @@ pub use reduction::{
     argmax, argmin, max, max_dim, mean, mean_backward, mean_dim, min, min_dim, std_dev, sum_dim,
     var,
 };
-pub use shape::{
-    cat, chunk, expand, flatten, narrow, permute, split, squeeze, stack, unsqueeze,
-};
+pub use shape::{cat, chunk, expand, flatten, narrow, permute, split, squeeze, stack, unsqueeze};
 pub use softmax::{softmax, softmax_backward};
-

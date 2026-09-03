@@ -20,9 +20,16 @@ venv/
 
 # Benchmark / experiment outputs
 benchmark_results.json
-training_loss.csv
-training_loss_static.csv
+training_loss*.csv
+benchmark/*.json
+
+# Documentation / research notes
+docs/
+
+# Transient execution logs & traces
+*.log
 
 # OS
 .DS_Store
 Thumbs.db
+

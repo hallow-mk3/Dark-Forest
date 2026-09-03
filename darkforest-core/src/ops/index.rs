@@ -1,4 +1,4 @@
-﻿//! Index ops — gather, scatter, index_select, masked_fill, where_, slice, narrow.
+//! Index ops — gather, scatter, index_select, masked_fill, where_, slice, narrow.
 
 use crate::tensor::{numel, Tensor};
 use anyhow::{anyhow, Result};
@@ -17,7 +17,12 @@ pub fn index_select(x: &Tensor, dim: usize, indices: &[usize]) -> Result<Tensor>
     let dim_size = shape[dim];
     for &idx in indices {
         if idx >= dim_size {
-            return Err(anyhow!("index_select: index {} out of range for dim {} with size {}", idx, dim, dim_size));
+            return Err(anyhow!(
+                "index_select: index {} out of range for dim {} with size {}",
+                idx,
+                dim,
+                dim_size
+            ));
         }
     }
     let n_sel = indices.len();
@@ -61,7 +66,11 @@ pub fn gather(x: &Tensor, dim: usize, index: &[usize]) -> Result<Tensor> {
         let o = flat / inner;
         let i = flat % inner;
         if idx >= dim_size {
-            return Err(anyhow!("gather: index {} out of range for dim size {}", idx, dim_size));
+            return Err(anyhow!(
+                "gather: index {} out of range for dim size {}",
+                idx,
+                dim_size
+            ));
         }
         out[flat] = src[o * dim_size * inner + idx * inner + i];
     }
@@ -95,7 +104,11 @@ pub fn scatter_add(x: &Tensor, dim: usize, index: &[usize], src: &[f32]) -> Resu
 // ---------------------------------------------------------------------------
 pub fn masked_fill(x: &Tensor, mask: &[bool], value: f32) -> Result<Tensor> {
     if mask.len() != x.numel() {
-        return Err(anyhow!("masked_fill: mask length {} != numel {}", mask.len(), x.numel()));
+        return Err(anyhow!(
+            "masked_fill: mask length {} != numel {}",
+            mask.len(),
+            x.numel()
+        ));
     }
     let mut out = x.to_vec();
     for (v, &m) in out.iter_mut().zip(mask.iter()) {
@@ -111,10 +124,18 @@ pub fn masked_fill(x: &Tensor, mask: &[bool], value: f32) -> Result<Tensor> {
 // ---------------------------------------------------------------------------
 pub fn where_op(condition: &[bool], a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if a.shape != b.shape {
-        return Err(anyhow!("where: shape mismatch {:?} vs {:?}", a.shape, b.shape));
+        return Err(anyhow!(
+            "where: shape mismatch {:?} vs {:?}",
+            a.shape,
+            b.shape
+        ));
     }
     if condition.len() != a.numel() {
-        return Err(anyhow!("where: condition length {} != numel {}", condition.len(), a.numel()));
+        return Err(anyhow!(
+            "where: condition length {} != numel {}",
+            condition.len(),
+            a.numel()
+        ));
     }
     let a_data = a.to_vec();
     let b_data = b.to_vec();

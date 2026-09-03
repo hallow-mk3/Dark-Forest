@@ -25,15 +25,15 @@ where
     fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
         // Recompute the forward graph with gradients enabled from the saved input
         let recomputed_in = Value::leaf(self.input.tensor());
-        let recomputed_out = (self.forward_fn)(&recomputed_in)
-            .expect("Checkpoint recomputation forward failed");
+        let recomputed_out =
+            (self.forward_fn)(&recomputed_in).expect("Checkpoint recomputation forward failed");
 
         // Seed gradient into recomputed output and run backward
         recomputed_out._backward_recursive(grad_output);
 
-        let in_grad = recomputed_in
-            .grad_tensor()
-            .unwrap_or_else(|| Tensor::zeros_device(self.input.shape(), self.input.tensor().device.clone()));
+        let in_grad = recomputed_in.grad_tensor().unwrap_or_else(|| {
+            Tensor::zeros_device(self.input.shape(), self.input.tensor().device.clone())
+        });
 
         vec![in_grad]
     }
@@ -103,7 +103,12 @@ mod tests {
         let grad_chk = x_chk.grad();
         assert_eq!(grad_std.len(), grad_chk.len());
         for (g1, g2) in grad_std.iter().zip(grad_chk.iter()) {
-            assert!((g1 - g2).abs() < 1e-5, "Checkpoint gradient must match standard gradient: {} vs {}", g1, g2);
+            assert!(
+                (g1 - g2).abs() < 1e-5,
+                "Checkpoint gradient must match standard gradient: {} vs {}",
+                g1,
+                g2
+            );
         }
     }
 }

@@ -1,0 +1,16 @@
+CompileFlags:
+  Add:
+    - "-xcuda"
+    - "--cuda-path=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3"
+    - "-nocudalib"
+    - "-I${workspaceFolder}/darkforest-cuda/kernels"
+    - "-I${workspaceFolder}"
+    - "-D__CUDACC__"
+    - "-D__CUDA_ARCH__=1200"
+    - "-Wno-unknown-attributes"
+    - "-Wno-unused-value"
+  Remove:
+    - "-fmodules"
+Diagnostics:
+  Suppress:
+    - "*"

@@ -297,3 +297,141 @@ extern "C" void launch_embedding_backward(const uint32_t* indices,
     dim3 blocks((embed_dim + 31) / 32, (seq_len + 7) / 8);
     kernel_embedding_backward<<<blocks, threads>>>(indices, grad_out, grad_weight, seq_len, embed_dim);
 }
+
+// ---------------------------------------------------------------------------
+// Speculative Decoding Token Verification Kernel
+//
+// Speculative decoding (Leviathan et al., 2023) accelerates autoregressive
+// generation by running K tokens in parallel through a small "draft" model,
+// then verifying all K tokens against the target model's distribution in
+// a single forward pass, batching K verifications at once.
+//
+// This kernel implements the critical verification acceptance step:
+//   For each draft token i in [0, K):
+//     p_target = target_probs[i, draft_token[i]]
+//     p_draft  = draft_probs[i, draft_token[i]]
+//     accept   = (p_target / p_draft) >= threshold   (simplified rejection sampling)
+//
+// Inputs:
+//   target_probs [K, vocab_size]  — target model's probability for each draft step
+//   draft_probs  [K, vocab_size]  — draft model's probability for each draft step
+//   draft_tokens [K]              — token indices chosen by the draft model
+//   threshold    — acceptance threshold (≈1.0 for exact rejection sampling)
+//   K            — number of draft tokens to verify
+//   vocab_size   — vocabulary size
+//
+// Outputs:
+//   accept_mask [K] — 1 if token accepted, 0 if rejected (stops at first rejection)
+//   n_accepted  [1] — number of accepted tokens (scalar, set by thread 0)
+// ---------------------------------------------------------------------------
+__global__ void kernel_speculative_verify(
+    const float* __restrict__ target_probs,
+    const float* __restrict__ draft_probs,
+    const uint32_t* __restrict__ draft_tokens,
+    float* __restrict__ accept_mask,
+    uint32_t* __restrict__ n_accepted,
+    float threshold,
+    uint32_t K,
+    uint32_t vocab_size
+) {
+    // One thread per draft token — perfectly fine for small K (typically 4-8)
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= K) return;
+
+    uint32_t token_id = draft_tokens[i];
+    float p_target = target_probs[(size_t)i * vocab_size + token_id];
+    float p_draft  = draft_probs[(size_t)i * vocab_size + token_id];
+
+    // Acceptance ratio: min(1, p_target / p_draft)
+    float ratio = (p_draft > 1e-9f) ? (p_target / p_draft) : 1.0f;
+    float accepted = (ratio >= threshold) ? 1.0f : 0.0f;
+    accept_mask[i] = accepted;
+
+    // Determine the prefix length — first rejection terminates the accepted run.
+    // Using atomicMin on the first rejected index (stored in n_accepted scratch).
+    // Thread 0 initializes n_accepted = K; rejected tokens reduce it.
+    if (accepted < 0.5f) {
+        atomicMin(n_accepted, i);
+    }
+}
+
+extern "C" void launch_speculative_verify(
+    const float* target_probs,
+    const float* draft_probs,
+    const uint32_t* draft_tokens,
+    float* accept_mask,
+    uint32_t* n_accepted,
+    float threshold,
+    uint32_t K,
+    uint32_t vocab_size
+) {
+    // Initialize n_accepted = K (assume full acceptance, reduce on rejection)
+    cudaMemsetAsync(n_accepted, 0xFF, sizeof(uint32_t)); // sets to UINT32_MAX initially
+    // Overwrite with actual K
+    uint32_t K_val = K;
+    cudaMemcpyAsync(n_accepted, &K_val, sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    uint32_t threads = 32; // K is small (4-8 tokens), one warp is sufficient
+    uint32_t blocks  = (K + threads - 1) / threads;
+    kernel_speculative_verify<<<blocks, threads>>>(
+        target_probs, draft_probs, draft_tokens,
+        accept_mask, n_accepted,
+        threshold, K, vocab_size
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Gradient Checkpointing — Selective Activation Rescaling
+//
+// Gradient checkpointing (Chen et al., 2016) trades compute for memory by
+// not storing intermediate activations during the forward pass, recomputing
+// them on demand during the backward pass. This allows training models with
+// context lengths proportional to sqrt(layers) in activation memory rather
+// than O(layers).
+//
+// This kernel implements the gradient scaling step applied when re-entering
+// a checkpointed segment: it multiplies each element by a running scale
+// factor to maintain numerical consistency across recomputed segments.
+//
+// Inputs:
+//   x      [n]      — activation tensor to rescale
+//   scale  [1]      — global scale factor (e.g., gradient norm clipping scale)
+//   n               — total number of elements
+//
+// Output:
+//   out    [n]      — rescaled activations (can alias x for in-place)
+// ---------------------------------------------------------------------------
+__global__ void kernel_gradient_checkpoint_scale(
+    const float* __restrict__ x,
+    float* __restrict__ out,
+    float scale,
+    uint32_t n
+) {
+    uint32_t idx = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    if (idx + 4 <= n) {
+        float4 va = *reinterpret_cast<const float4*>(x + idx);
+        float4 vc;
+        vc.x = va.x * scale;
+        vc.y = va.y * scale;
+        vc.z = va.z * scale;
+        vc.w = va.w * scale;
+        *reinterpret_cast<float4*>(out + idx) = vc;
+    } else {
+        for (uint32_t i = idx; i < n; ++i) {
+            out[i] = x[i] * scale;
+        }
+    }
+}
+
+extern "C" void launch_gradient_checkpoint_scale(
+    const float* x,
+    float* out,
+    float scale,
+    uint32_t n
+) {
+    uint32_t threads = 256;
+    uint32_t blocks  = (n / 4 + threads - 1) / threads;
+    if (blocks == 0) blocks = 1;
+    kernel_gradient_checkpoint_scale<<<blocks, threads>>>(x, out, scale, n);
+}
+

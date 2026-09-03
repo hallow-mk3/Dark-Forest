@@ -21,9 +21,14 @@ impl CharTokenizer {
             .into_iter()
             .collect();
         let index_by_char = chars.iter().enumerate().map(|(i, &c)| (c, i)).collect();
-        CharTokenizer { vocab: chars, index_by_char }
+        CharTokenizer {
+            vocab: chars,
+            index_by_char,
+        }
     }
-    fn vocab_size(&self) -> usize { self.vocab.len() }
+    fn vocab_size(&self) -> usize {
+        self.vocab.len()
+    }
     fn encode(&self, text: &str) -> Vec<usize> {
         text.chars()
             .filter_map(|c| self.index_by_char.get(&c).copied())
@@ -55,15 +60,41 @@ fn main() -> Result<()> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--steps" => { n_steps = args[i+1].parse()?; i += 2; }
-            "--ctx-len" => { ctx_len = args[i+1].parse()?; i += 2; }
-            "--d-model" => { d_model = args[i+1].parse()?; i += 2; }
-            "--n-layers" => { n_layers = args[i+1].parse()?; i += 2; }
-            "--d-ff" => { d_ff = args[i+1].parse()?; i += 2; }
-            "--n-heads" => { n_heads = args[i+1].parse()?; i += 2; }
-            "--lr" => { lr = args[i+1].parse()?; i += 2; }
-            "--vocab-size" => { vocab_size_override = Some(args[i+1].parse()?); i += 2; }
-            _ => { i += 1; }
+            "--steps" => {
+                n_steps = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--ctx-len" => {
+                ctx_len = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--d-model" => {
+                d_model = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--n-layers" => {
+                n_layers = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--d-ff" => {
+                d_ff = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--n-heads" => {
+                n_heads = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--lr" => {
+                lr = args[i + 1].parse()?;
+                i += 2;
+            }
+            "--vocab-size" => {
+                vocab_size_override = Some(args[i + 1].parse()?);
+                i += 2;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -74,10 +105,17 @@ fn main() -> Result<()> {
 
     println!("Dark Forest — Static Engine Training");
     println!("=====================================");
-    println!("vocab={}, tokens={}, ctx={}", vocab_size, tokens.len(), ctx_len);
+    println!(
+        "vocab={}, tokens={}, ctx={}",
+        vocab_size,
+        tokens.len(),
+        ctx_len
+    );
 
-    println!("Configuration: d_model={}, n_layers={}, n_heads={}, d_ff={}, lr={}, vocab_size={}",
-             d_model, n_layers, n_heads, d_ff, lr, vocab_size);
+    println!(
+        "Configuration: d_model={}, n_layers={}, n_heads={}, d_ff={}, lr={}, vocab_size={}",
+        d_model, n_layers, n_heads, d_ff, lr, vocab_size
+    );
 
     let mut model = StaticGPT2::new(vocab_size, d_model, n_heads, n_layers, d_ff, ctx_len, lr)?;
 
@@ -100,7 +138,7 @@ fn main() -> Result<()> {
         let t0 = Instant::now();
 
         let start = rng.gen_range(0..n_tokens - ctx_len - 1);
-        let input_tokens  = &tokens[start..start + ctx_len];
+        let input_tokens = &tokens[start..start + ctx_len];
         let target_tokens = &tokens[start + 1..start + ctx_len + 1];
 
         let loss_val = model.step(input_tokens, target_tokens)?;
@@ -125,8 +163,16 @@ fn main() -> Result<()> {
     // Skip first 5 steps (warmup) for median
     let mut warm = step_times_ms[5.min(step_times_ms.len() - 1)..].to_vec();
     warm.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_ms = if warm.is_empty() { f64::NAN } else { warm[warm.len() / 2] };
-    let mean_ms: f64 = if warm.is_empty() { f64::NAN } else { warm.iter().sum::<f64>() / warm.len() as f64 };
+    let median_ms = if warm.is_empty() {
+        f64::NAN
+    } else {
+        warm[warm.len() / 2]
+    };
+    let mean_ms: f64 = if warm.is_empty() {
+        f64::NAN
+    } else {
+        warm.iter().sum::<f64>() / warm.len() as f64
+    };
 
     println!("\n=======================================================");
     println!(" Dark Forest Static Engine — Final Benchmark");
@@ -134,8 +180,12 @@ fn main() -> Result<()> {
     println!(" Steps:         {}", n_steps);
     println!(" Median step:   {:.3} ms", median_ms);
     println!(" Mean step:     {:.3} ms", mean_ms);
-    println!(" Loss: initial {:.4} | final {:.4} | min {:.4}",
-             first_loss.unwrap_or(final_loss), final_loss, min_loss);
+    println!(
+        " Loss: initial {:.4} | final {:.4} | min {:.4}",
+        first_loss.unwrap_or(final_loss),
+        final_loss,
+        min_loss
+    );
     println!("=======================================================");
 
     Ok(())

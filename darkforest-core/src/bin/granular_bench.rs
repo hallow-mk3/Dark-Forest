@@ -24,10 +24,13 @@ fn main() -> Result<()> {
     let lr = 3e-4;
 
     let mut model = StaticGPT2::new(vocab_size, d_model, n_heads, n_layers, d_ff, seq_len, lr)?;
-    let in_tokens  = vec![1usize; seq_len];
+    let in_tokens = vec![1usize; seq_len];
     let tgt_tokens = vec![2usize; seq_len];
 
-    for _ in 0..3 { let _ = model.step(&in_tokens, &tgt_tokens)?; darkforest_core::cuda_sync()?; }
+    for _ in 0..3 {
+        let _ = model.step(&in_tokens, &tgt_tokens)?;
+        darkforest_core::cuda_sync()?;
+    }
 
     println!("[Granular per-operation timing with sync after each op]");
     model.profile_step(&in_tokens, &tgt_tokens)?;

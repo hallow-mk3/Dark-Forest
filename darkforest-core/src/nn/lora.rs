@@ -117,7 +117,16 @@ mod tests {
 
     #[test]
     fn test_lora_initial_zero_delta() {
-        let lora = LoRALinear::new(32, 64, true, LoRAConfig { rank: 4, alpha: 8.0, dropout: 0.0 });
+        let lora = LoRALinear::new(
+            32,
+            64,
+            true,
+            LoRAConfig {
+                rank: 4,
+                alpha: 8.0,
+                dropout: 0.0,
+            },
+        );
         let x = Value::leaf(Tensor::randn(vec![2, 32], 1.0));
 
         let out = lora.forward(&x).unwrap();
@@ -128,13 +137,25 @@ mod tests {
 
         assert_eq!(out_data.len(), base_data.len());
         for (a, b) in out_data.iter().zip(base_data.iter()) {
-            assert!((a - b).abs() < 1e-5, "LoRA output must initially match base output");
+            assert!(
+                (a - b).abs() < 1e-5,
+                "LoRA output must initially match base output"
+            );
         }
     }
 
     #[test]
     fn test_lora_trainable_params_count() {
-        let lora = LoRALinear::new(128, 256, true, LoRAConfig { rank: 8, alpha: 16.0, dropout: 0.0 });
+        let lora = LoRALinear::new(
+            128,
+            256,
+            true,
+            LoRAConfig {
+                rank: 8,
+                alpha: 16.0,
+                dropout: 0.0,
+            },
+        );
         let trainable = lora.trainable_parameters();
         assert_eq!(trainable.len(), 2);
         assert_eq!(trainable[0].shape(), vec![8, 128]);

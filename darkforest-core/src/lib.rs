@@ -20,7 +20,6 @@ pub use optimizer::{AdamW, OffloadedAdamW};
 pub use scheduler::{CosineAnnealingLR, ExponentialLR, LRScheduler, StepLR};
 pub use tensor::{DType, Device, Shape, Tensor};
 
-
 pub fn cuda_sync() -> anyhow::Result<()> {
     #[cfg(feature = "cuda")]
     {
@@ -212,6 +211,8 @@ mod cuda_tests {
         loss.backward();
         let grads = model.parameters();
         assert!(grads.iter().all(|p| p.grad_tensor().is_some()));
-        assert!(grads.iter().all(|p| p.grad_tensor().unwrap().device == super::Device::Cuda(0)));
+        assert!(grads
+            .iter()
+            .all(|p| p.grad_tensor().unwrap().device == super::Device::Cuda(0)));
     }
 }

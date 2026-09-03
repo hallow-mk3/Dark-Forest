@@ -25,7 +25,10 @@ fn product_name() -> PyResult<String> {
 #[cfg(feature = "python")]
 #[pyfunction]
 fn status() -> PyResult<String> {
-    Ok("alpha-ready: Rust autograd core, CUDA fallback path, Python bindings scaffolded".to_string())
+    Ok(
+        "alpha-ready: Rust autograd core, CUDA fallback path, Python bindings scaffolded"
+            .to_string(),
+    )
 }
 
 #[cfg(feature = "python")]
@@ -35,19 +38,23 @@ fn smoke_test() -> PyResult<String> {
     use darkforest_core::tensor::Tensor;
 
     let a = Value::leaf(
-        Tensor::from_vec(vec![1.0, -1.0, 2.0], vec![3])
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("tensor init failed: {e}")))?,
+        Tensor::from_vec(vec![1.0, -1.0, 2.0], vec![3]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("tensor init failed: {e}"))
+        })?,
     );
     let b = Value::leaf(
-        Tensor::from_vec(vec![0.5, 1.5, -0.5], vec![3])
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("tensor init failed: {e}")))?,
+        Tensor::from_vec(vec![0.5, 1.5, -0.5], vec![3]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("tensor init failed: {e}"))
+        })?,
     );
 
     let loss = a
         .add(&b)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("op failed: {e}")))?
         .sum()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("sum failed: {e}")))?;
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("sum failed: {e}"))
+        })?;
     loss.backward();
 
     let grad_a = a.grad();
@@ -90,12 +97,14 @@ fn benchmark_matrix_step(steps: usize, rows: usize, cols: usize) -> PyResult<Has
         .map(|idx| (((idx as f32) + 2.0) % 9.0) - 4.0)
         .collect();
 
-    let a_tensor = Tensor::from_vec_device(a_vec, vec![rows, cols], device.clone()).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("a tensor init failed: {e}"))
-    })?;
-    let b_tensor = Tensor::from_vec_device(b_vec, vec![cols, rows], device.clone()).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("b tensor init failed: {e}"))
-    })?;
+    let a_tensor =
+        Tensor::from_vec_device(a_vec, vec![rows, cols], device.clone()).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("a tensor init failed: {e}"))
+        })?;
+    let b_tensor =
+        Tensor::from_vec_device(b_vec, vec![cols, rows], device.clone()).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("b tensor init failed: {e}"))
+        })?;
 
     // Warmup (5 iterations)
     for _ in 0..5 {
@@ -113,7 +122,9 @@ fn benchmark_matrix_step(steps: usize, rows: usize, cols: usize) -> PyResult<Has
 
     #[cfg(feature = "cuda")]
     let timer = darkforest_core::CudaEventTimer::new().map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("CudaEventTimer init failed: {e}"))
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "CudaEventTimer init failed: {e}"
+        ))
     })?;
 
     let mut samples = Vec::with_capacity(steps);
@@ -164,8 +175,14 @@ fn benchmark_matrix_step(steps: usize, rows: usize, cols: usize) -> PyResult<Has
     result.insert("cols".to_string(), cols as f64);
     result.insert("mean_ms".to_string(), mean);
     result.insert("median_ms".to_string(), median);
-    result.insert("min_ms".to_string(), samples.iter().copied().fold(f64::INFINITY, f64::min));
-    result.insert("max_ms".to_string(), samples.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+    result.insert(
+        "min_ms".to_string(),
+        samples.iter().copied().fold(f64::INFINITY, f64::min),
+    );
+    result.insert(
+        "max_ms".to_string(),
+        samples.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    );
     Ok(result)
 }
 

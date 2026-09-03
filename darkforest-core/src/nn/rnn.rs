@@ -1,4 +1,4 @@
-﻿//! Recurrent Neural Network layers: RNNCell, LSTMCell, GRUCell, LSTM, GRU.
+//! Recurrent Neural Network layers: RNNCell, LSTMCell, GRUCell, LSTM, GRU.
 
 use crate::autograd::Value;
 use crate::nn::Linear;
@@ -85,8 +85,16 @@ impl LSTMCell {
         }
 
         let dev = x.tensor().device;
-        let v_h = Value::leaf(crate::tensor::Tensor::from_vec_device(next_h, vec![1, hs], dev.clone())?);
-        let v_c = Value::leaf(crate::tensor::Tensor::from_vec_device(next_c, vec![1, hs], dev)?);
+        let v_h = Value::leaf(crate::tensor::Tensor::from_vec_device(
+            next_h,
+            vec![1, hs],
+            dev.clone(),
+        )?);
+        let v_c = Value::leaf(crate::tensor::Tensor::from_vec_device(
+            next_c,
+            vec![1, hs],
+            dev,
+        )?);
         Ok((v_h, v_c))
     }
 

@@ -12,4 +12,3 @@ pub mod static_gpt2;
 pub use generate::{generate, sample_next_token, SamplerConfig};
 pub use kv_cache::KVCache;
 pub use static_gpt2::StaticGPT2;
-

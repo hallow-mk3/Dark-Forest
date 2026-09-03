@@ -1,4 +1,4 @@
-﻿//! Reduction ops — full PyTorch parity.
+//! Reduction ops — full PyTorch parity.
 //!
 //! Includes: mean, var, std, sum_dim, mean_dim, max, min, argmax, argmin.
 //! All with optional dimension and keepdim semantics.
@@ -11,7 +11,11 @@ use anyhow::{anyhow, Result};
 // ---------------------------------------------------------------------------
 
 fn check_dim(ndim: usize, dim: i64) -> Result<usize> {
-    let d = if dim < 0 { (ndim as i64 + dim) as usize } else { dim as usize };
+    let d = if dim < 0 {
+        (ndim as i64 + dim) as usize
+    } else {
+        dim as usize
+    };
     if d >= ndim {
         return Err(anyhow!("dim {} out of range for ndim {}", dim, ndim));
     }
@@ -87,20 +91,12 @@ pub fn std_dev(x: &Tensor, unbiased: bool) -> Result<Tensor> {
 // max / min — scalar
 // ---------------------------------------------------------------------------
 pub fn max(x: &Tensor) -> Result<Tensor> {
-    let v = x
-        .to_vec()
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let v = x.to_vec().iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     Tensor::from_vec_device(vec![v], vec![1], x.device.clone())
 }
 
 pub fn min(x: &Tensor) -> Result<Tensor> {
-    let v = x
-        .to_vec()
-        .iter()
-        .cloned()
-        .fold(f32::INFINITY, f32::min);
+    let v = x.to_vec().iter().cloned().fold(f32::INFINITY, f32::min);
     Tensor::from_vec_device(vec![v], vec![1], x.device.clone())
 }
 

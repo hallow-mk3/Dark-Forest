@@ -18,9 +18,20 @@ mod cuda_runtime {
         pub fn cudaFree(ptr: *mut c_void) -> i32;
         pub fn cudaMallocHost(ptr: *mut *mut c_void, bytes: usize) -> i32;
         pub fn cudaFreeHost(ptr: *mut c_void) -> i32;
-        pub fn cudaMemsetAsync(ptr: *mut c_void, value: i32, bytes: usize, stream: *mut c_void) -> i32;
+        pub fn cudaMemsetAsync(
+            ptr: *mut c_void,
+            value: i32,
+            bytes: usize,
+            stream: *mut c_void,
+        ) -> i32;
         pub fn cudaMemcpy(dst: *mut c_void, src: *const c_void, bytes: usize, kind: i32) -> i32;
-        pub fn cudaMemcpyAsync(dst: *mut c_void, src: *const c_void, bytes: usize, kind: i32, stream: *mut c_void) -> i32;
+        pub fn cudaMemcpyAsync(
+            dst: *mut c_void,
+            src: *const c_void,
+            bytes: usize,
+            kind: i32,
+            stream: *mut c_void,
+        ) -> i32;
     }
 }
 
@@ -220,6 +231,22 @@ impl CudaBuffer {
         #[cfg(not(darkforest_cuda_kernels))]
         Err(anyhow!("CUDA not available"))
     }
+
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr as *const u8
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr
+    }
+
+    pub fn as_bf16_mut_ptr(&mut self) -> *mut u16 {
+        self.ptr as *mut u16
+    }
+
+    pub fn as_bf16_ptr(&self) -> *const u16 {
+        self.ptr as *const u16
+    }
 }
 
 impl Drop for CudaBuffer {
@@ -257,7 +284,10 @@ impl PinnedBuffer {
             if code != 0 {
                 return Err(anyhow!("cudaMallocHost failed: {code}"));
             }
-            return Ok(PinnedBuffer { ptr: ptr as *mut u8, bytes });
+            return Ok(PinnedBuffer {
+                ptr: ptr as *mut u8,
+                bytes,
+            });
         }
         #[cfg(not(darkforest_cuda_kernels))]
         {

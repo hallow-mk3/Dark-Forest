@@ -1,4 +1,4 @@
-﻿//! Pooling layers: MaxPool2d, AvgPool2d, AdaptiveAvgPool2d.
+//! Pooling layers: MaxPool2d, AvgPool2d, AdaptiveAvgPool2d.
 
 use crate::autograd::Value;
 use crate::tensor::Tensor;
@@ -11,7 +11,11 @@ pub struct MaxPool2d {
 }
 
 impl MaxPool2d {
-    pub fn new(kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> Self {
+    pub fn new(
+        kernel_size: (usize, usize),
+        stride: (usize, usize),
+        padding: (usize, usize),
+    ) -> Self {
         MaxPool2d {
             kernel_size,
             stride,
@@ -47,16 +51,28 @@ impl MaxPool2d {
                             for f_w in 0..kw {
                                 let cur_h = ih_start + f_h as isize;
                                 let cur_w = iw_start + f_w as isize;
-                                if cur_h >= 0 && cur_h < h as isize && cur_w >= 0 && cur_w < w as isize {
-                                    let in_idx = b * (c * h * w) + ch * (h * w) + (cur_h as usize) * w + (cur_w as usize);
+                                if cur_h >= 0
+                                    && cur_h < h as isize
+                                    && cur_w >= 0
+                                    && cur_w < w as isize
+                                {
+                                    let in_idx = b * (c * h * w)
+                                        + ch * (h * w)
+                                        + (cur_h as usize) * w
+                                        + (cur_w as usize);
                                     if x_data[in_idx] > max_val {
                                         max_val = x_data[in_idx];
                                     }
                                 }
                             }
                         }
-                        let out_idx = b * (c * out_h * out_w) + ch * (out_h * out_w) + oh * out_w + ow;
-                        out_data[out_idx] = if max_val == f32::NEG_INFINITY { 0.0 } else { max_val };
+                        let out_idx =
+                            b * (c * out_h * out_w) + ch * (out_h * out_w) + oh * out_w + ow;
+                        out_data[out_idx] = if max_val == f32::NEG_INFINITY {
+                            0.0
+                        } else {
+                            max_val
+                        };
                     }
                 }
             }
@@ -77,7 +93,11 @@ pub struct AvgPool2d {
 }
 
 impl AvgPool2d {
-    pub fn new(kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> Self {
+    pub fn new(
+        kernel_size: (usize, usize),
+        stride: (usize, usize),
+        padding: (usize, usize),
+    ) -> Self {
         AvgPool2d {
             kernel_size,
             stride,
@@ -114,14 +134,22 @@ impl AvgPool2d {
                             for f_w in 0..kw {
                                 let cur_h = ih_start + f_h as isize;
                                 let cur_w = iw_start + f_w as isize;
-                                if cur_h >= 0 && cur_h < h as isize && cur_w >= 0 && cur_w < w as isize {
-                                    let in_idx = b * (c * h * w) + ch * (h * w) + (cur_h as usize) * w + (cur_w as usize);
+                                if cur_h >= 0
+                                    && cur_h < h as isize
+                                    && cur_w >= 0
+                                    && cur_w < w as isize
+                                {
+                                    let in_idx = b * (c * h * w)
+                                        + ch * (h * w)
+                                        + (cur_h as usize) * w
+                                        + (cur_w as usize);
                                     sum += x_data[in_idx];
                                 }
                                 count += 1.0;
                             }
                         }
-                        let out_idx = b * (c * out_h * out_w) + ch * (out_h * out_w) + oh * out_w + ow;
+                        let out_idx =
+                            b * (c * out_h * out_w) + ch * (out_h * out_w) + oh * out_w + ow;
                         out_data[out_idx] = sum / count.max(1.0);
                     }
                 }
@@ -176,7 +204,8 @@ impl AdaptiveAvgPool2d {
                             }
                         }
 
-                        let out_idx = b * (c * out_h * out_w) + ch * (out_h * out_w) + oh * out_w + ow;
+                        let out_idx =
+                            b * (c * out_h * out_w) + ch * (out_h * out_w) + oh * out_w + ow;
                         out_data[out_idx] = sum / (count.max(1) as f32);
                     }
                 }

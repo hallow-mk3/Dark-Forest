@@ -1,4 +1,4 @@
-﻿//! Dataset and DataLoader abstractions for batching and dataset shuffling.
+//! Dataset and DataLoader abstractions for batching and dataset shuffling.
 
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
@@ -20,7 +20,9 @@ pub struct TensorDataset {
 impl TensorDataset {
     pub fn new(inputs: Tensor, targets: Tensor) -> Result<Self> {
         if inputs.shape[0] != targets.shape[0] {
-            return Err(anyhow!("TensorDataset: inputs and targets batch size mismatch"));
+            return Err(anyhow!(
+                "TensorDataset: inputs and targets batch size mismatch"
+            ));
         }
         Ok(TensorDataset { inputs, targets })
     }
@@ -49,7 +51,12 @@ pub struct DataLoader<'a> {
 }
 
 impl<'a> DataLoader<'a> {
-    pub fn new(dataset: &'a dyn Dataset, batch_size: usize, shuffle: bool, drop_last: bool) -> Self {
+    pub fn new(
+        dataset: &'a dyn Dataset,
+        batch_size: usize,
+        shuffle: bool,
+        drop_last: bool,
+    ) -> Self {
         let len = dataset.len();
         let mut indices: Vec<usize> = (0..len).collect();
         if shuffle {

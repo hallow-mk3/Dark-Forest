@@ -17,7 +17,12 @@
 // kernel. Eliminates all intermediate CPU-GPU round-trips.
 // ---------------------------------------------------------------------------
 extern "C" void darkforest_sync() {
-    cudaDeviceSynchronize();
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[darkforest] CUDA kernel error at sync boundary: %s\n",
+                cudaGetErrorString(err));
+        abort();
+    }
 }
 
 // ---------------------------------------------------------------------------

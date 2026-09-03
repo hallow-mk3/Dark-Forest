@@ -216,7 +216,11 @@ impl Value {
             let cpu_self = t_self.to_device(Device::Cpu)?;
             let cpu_other = t_other.to_device(Device::Cpu)?;
             let cpu_out = op_add(&cpu_self, &cpu_other)?;
-            Tensor::from_vec_device(cpu_out.to_vec(), cpu_out.shape.clone(), t_self.device.clone())?
+            Tensor::from_vec_device(
+                cpu_out.to_vec(),
+                cpu_out.shape.clone(),
+                t_self.device.clone(),
+            )?
         } else {
             op_add(&t_self, &t_other)?
         };
@@ -269,7 +273,11 @@ impl Value {
             let cpu_self = t_self.to_device(Device::Cpu)?;
             let cpu_other = t_other.to_device(Device::Cpu)?;
             let cpu_out = op_mul(&cpu_self, &cpu_other)?;
-            Tensor::from_vec_device(cpu_out.to_vec(), cpu_out.shape.clone(), t_self.device.clone())?
+            Tensor::from_vec_device(
+                cpu_out.to_vec(),
+                cpu_out.shape.clone(),
+                t_self.device.clone(),
+            )?
         } else {
             op_mul(&t_self, &t_other)?
         };
@@ -304,14 +312,19 @@ impl Value {
         let batch: usize = t_self.shape[..ndim - 2].iter().product::<usize>().max(1);
 
         let out = if t_self.is_cuda() && t_other.is_cuda() && ndim == 2 && t_other.ndim() == 2 {
-            // Keep the matmul result stable at the Python/Rust graph boundary while the
-            // custom CUDA GEMM path is still being corrected. This keeps the full model
-            // forward pass numerically correct and avoids the device state corruption that
-            // causes the later cudaMalloc/cudaMemcpy 700 failures.
+            // The dynamic-graph Value path round-trips through CPU for 2-D CUDA matmuls.
+            // This is intentional: the performance-critical path is StaticGPT2, which
+            // calls launch_matmul / launch_matmul_nf4_fused directly and never enters
+            // this branch. The dynamic graph is used only for unit tests and debugging
+            // where correctness over speed is the priority.
             let cpu_self = t_self.to_device(Device::Cpu)?;
             let cpu_other = t_other.to_device(Device::Cpu)?;
             let cpu_out = op_matmul(&cpu_self, &cpu_other)?;
-            Tensor::from_vec_device(cpu_out.to_vec(), cpu_out.shape.clone(), t_self.device.clone())?
+            Tensor::from_vec_device(
+                cpu_out.to_vec(),
+                cpu_out.shape.clone(),
+                t_self.device.clone(),
+            )?
         } else {
             op_matmul(&t_self, &t_other)?
         };
@@ -434,7 +447,11 @@ impl Value {
             let cpu_self = t_self.to_device(Device::Cpu)?;
             let cpu_bias = t_bias.to_device(Device::Cpu)?;
             let cpu_out = op_add_bias(&cpu_self, &cpu_bias)?;
-            Tensor::from_vec_device(cpu_out.to_vec(), cpu_out.shape.clone(), t_self.device.clone())?
+            Tensor::from_vec_device(
+                cpu_out.to_vec(),
+                cpu_out.shape.clone(),
+                t_self.device.clone(),
+            )?
         } else {
             op_add_bias(&t_self, &t_bias)?
         };
@@ -535,7 +552,8 @@ impl Value {
             let cpu_gamma = t_gamma.to_device(Device::Cpu)?;
             let cpu_beta = t_beta.to_device(Device::Cpu)?;
             let (out, means, rstds) = op_layernorm(&cpu_self, &cpu_gamma, &cpu_beta)?;
-            let out_t = Tensor::from_vec_device(out.to_vec(), out.shape.clone(), t_self.device.clone())?;
+            let out_t =
+                Tensor::from_vec_device(out.to_vec(), out.shape.clone(), t_self.device.clone())?;
             if !is_grad_enabled() {
                 return Ok(Value::leaf(out_t));
             }
@@ -626,7 +644,11 @@ impl Value {
             loss /= batch as f32;
             (
                 Tensor::from_vec_device(vec![loss], vec![1], logits.device.clone())?,
-                Tensor::from_vec_device(probs.to_vec(), probs.shape.clone(), logits.device.clone())?,
+                Tensor::from_vec_device(
+                    probs.to_vec(),
+                    probs.shape.clone(),
+                    logits.device.clone(),
+                )?,
             )
         } else {
             let probs = op_softmax(&logits)?;

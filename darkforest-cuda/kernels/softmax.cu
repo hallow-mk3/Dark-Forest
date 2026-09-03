@@ -87,7 +87,7 @@ extern "C" void launch_softmax(float* x, uint32_t rows, uint32_t cols) {
 }
 
 // ---------------------------------------------------------------------------
-// Softmax backward — warp-parallel dot product per row
+// Softmax backward — block-wide multi-warp parallel dot product per row
 // ---------------------------------------------------------------------------
 __global__ void kernel_softmax_backward(
     const float* __restrict__ probabilities,
@@ -95,19 +95,29 @@ __global__ void kernel_softmax_backward(
     float* __restrict__ grad_input,
     uint32_t cols
 ) {
+    extern __shared__ float s_warp_dots[];
     uint32_t row = blockIdx.x;
     const float* prob_row = probabilities + (size_t)row * cols;
     const float* go_row   = grad_output   + (size_t)row * cols;
+    uint32_t n_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
 
     float thread_dot = 0.0f;
     for (uint32_t col = threadIdx.x; col < cols; col += blockDim.x)
         thread_dot += prob_row[col] * go_row[col];
 
-    float dot = warp_reduce_sum(thread_dot);
-    __shared__ float s_dot;
-    if (threadIdx.x == 0) s_dot = dot;
+    float warp_dot = warp_reduce_sum(thread_dot);
+    if (threadIdx.x % WARP_SIZE == 0) {
+        s_warp_dots[threadIdx.x / WARP_SIZE] = warp_dot;
+    }
     __syncthreads();
-    dot = s_dot;
+
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? s_warp_dots[threadIdx.x] : 0.0f;
+        v = warp_reduce_sum(v);
+        if (threadIdx.x == 0) s_warp_dots[0] = v;
+    }
+    __syncthreads();
+    float dot = s_warp_dots[0];
 
     for (uint32_t col = threadIdx.x; col < cols; col += blockDim.x)
         grad_input[(size_t)row * cols + col] = prob_row[col] * (go_row[col] - dot);
@@ -121,7 +131,9 @@ extern "C" void launch_softmax_backward(
     uint32_t cols
 ) {
     uint32_t threads = max(32u, min(cols, 512u));
-    kernel_softmax_backward<<<rows, threads>>>(probabilities, grad_output, grad_input, cols);
+    uint32_t n_warps = (threads + WARP_SIZE - 1) / WARP_SIZE;
+    uint32_t shmem   = n_warps * sizeof(float);
+    kernel_softmax_backward<<<rows, threads, shmem>>>(probabilities, grad_output, grad_input, cols);
 }
 
 // ---------------------------------------------------------------------------

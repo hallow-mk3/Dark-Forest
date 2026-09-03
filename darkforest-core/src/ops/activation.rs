@@ -96,11 +96,7 @@ pub fn tanh_backward(grad_out: &[f32], output: &[f32]) -> Vec<f32> {
 // SiLU / Swish: x * sigmoid(x)
 // ---------------------------------------------------------------------------
 pub fn silu(x: &Tensor) -> Result<Tensor> {
-    let data: Vec<f32> = x
-        .to_vec()
-        .iter()
-        .map(|&v| v / (1.0 + (-v).exp()))
-        .collect();
+    let data: Vec<f32> = x.to_vec().iter().map(|&v| v / (1.0 + (-v).exp())).collect();
     Tensor::from_vec_device(data, x.shape.clone(), x.device.clone())
 }
 
@@ -152,13 +148,7 @@ pub fn elu_backward(grad_out: &[f32], x_data: &[f32], alpha: f32) -> Vec<f32> {
     grad_out
         .iter()
         .zip(x_data.iter())
-        .map(|(&g, &x)| {
-            if x >= 0.0 {
-                g
-            } else {
-                g * alpha * x.exp()
-            }
-        })
+        .map(|(&g, &x)| if x >= 0.0 { g } else { g * alpha * x.exp() })
         .collect()
 }
 

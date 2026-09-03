@@ -21,6 +21,9 @@ WARMUP   = 5
 DTYPE    = torch.float32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    torch.cuda.set_per_process_memory_fraction(0.85, 0)
+    print("Safety Check: GPU Memory capped at 85% maximum capacity.")
 print(f"Device : {torch.cuda.get_device_name(0)}")
 print(f"PyTorch: {torch.__version__}")
 print(f"Config : vocab={VOCAB}, ctx={CTX}, d_model={D_MODEL}, n_layers={N_LAYERS}")

@@ -1,4 +1,4 @@
-﻿//! Shape ops — full PyTorch parity.
+//! Shape ops — full PyTorch parity.
 //!
 //! unsqueeze, squeeze, flatten, cat, stack, split, chunk, permute, expand, view.
 
@@ -16,7 +16,11 @@ pub fn unsqueeze(x: &Tensor, dim: i64) -> Result<Tensor> {
         dim as usize
     };
     if d > ndim {
-        return Err(anyhow!("unsqueeze dim {} out of range for ndim {}", dim, ndim));
+        return Err(anyhow!(
+            "unsqueeze dim {} out of range for ndim {}",
+            dim,
+            ndim
+        ));
     }
     let mut new_shape = x.shape.clone();
     new_shape.insert(d, 1);
@@ -28,10 +32,19 @@ pub fn unsqueeze(x: &Tensor, dim: i64) -> Result<Tensor> {
 // ---------------------------------------------------------------------------
 pub fn squeeze(x: &Tensor, dim: Option<i64>) -> Result<Tensor> {
     let new_shape = match dim {
-        None => x.shape.iter().cloned().filter(|&d| d != 1).collect::<Vec<_>>(),
+        None => x
+            .shape
+            .iter()
+            .cloned()
+            .filter(|&d| d != 1)
+            .collect::<Vec<_>>(),
         Some(d) => {
             let ndim = x.ndim();
-            let idx = if d < 0 { (ndim as i64 + d) as usize } else { d as usize };
+            let idx = if d < 0 {
+                (ndim as i64 + d) as usize
+            } else {
+                d as usize
+            };
             if idx >= ndim {
                 return Err(anyhow!("squeeze dim {} out of range for ndim {}", d, ndim));
             }
@@ -44,7 +57,11 @@ pub fn squeeze(x: &Tensor, dim: Option<i64>) -> Result<Tensor> {
             }
         }
     };
-    let new_shape = if new_shape.is_empty() { vec![1] } else { new_shape };
+    let new_shape = if new_shape.is_empty() {
+        vec![1]
+    } else {
+        new_shape
+    };
     x.reshape(new_shape)
 }
 
@@ -53,10 +70,23 @@ pub fn squeeze(x: &Tensor, dim: Option<i64>) -> Result<Tensor> {
 // ---------------------------------------------------------------------------
 pub fn flatten(x: &Tensor, start_dim: i64, end_dim: i64) -> Result<Tensor> {
     let ndim = x.ndim();
-    let s = if start_dim < 0 { (ndim as i64 + start_dim) as usize } else { start_dim as usize };
-    let e = if end_dim < 0 { (ndim as i64 + end_dim) as usize } else { end_dim as usize };
+    let s = if start_dim < 0 {
+        (ndim as i64 + start_dim) as usize
+    } else {
+        start_dim as usize
+    };
+    let e = if end_dim < 0 {
+        (ndim as i64 + end_dim) as usize
+    } else {
+        end_dim as usize
+    };
     if s > e || e >= ndim {
-        return Err(anyhow!("flatten: invalid dims [{}, {}] for ndim {}", start_dim, end_dim, ndim));
+        return Err(anyhow!(
+            "flatten: invalid dims [{}, {}] for ndim {}",
+            start_dim,
+            end_dim,
+            ndim
+        ));
     }
     let flat: usize = x.shape[s..=e].iter().product();
     let mut new_shape: Vec<usize> = x.shape[..s].to_vec();
@@ -71,7 +101,11 @@ pub fn flatten(x: &Tensor, start_dim: i64, end_dim: i64) -> Result<Tensor> {
 pub fn permute(x: &Tensor, dims: &[usize]) -> Result<Tensor> {
     let ndim = x.ndim();
     if dims.len() != ndim {
-        return Err(anyhow!("permute: dims length {} != ndim {}", dims.len(), ndim));
+        return Err(anyhow!(
+            "permute: dims length {} != ndim {}",
+            dims.len(),
+            ndim
+        ));
     }
     let mut used = vec![false; ndim];
     for &d in dims {
@@ -184,7 +218,11 @@ pub fn stack(tensors: &[&Tensor], dim: usize) -> Result<Tensor> {
 // ---------------------------------------------------------------------------
 pub fn split(x: &Tensor, split_size: usize, dim: usize) -> Result<Vec<Tensor>> {
     if dim >= x.ndim() {
-        return Err(anyhow!("split: dim {} out of range for ndim {}", dim, x.ndim()));
+        return Err(anyhow!(
+            "split: dim {} out of range for ndim {}",
+            dim,
+            x.ndim()
+        ));
     }
     let total = x.shape[dim];
     let mut chunks = Vec::new();
@@ -203,7 +241,11 @@ pub fn split(x: &Tensor, split_size: usize, dim: usize) -> Result<Vec<Tensor>> {
 // ---------------------------------------------------------------------------
 pub fn chunk(x: &Tensor, n_chunks: usize, dim: usize) -> Result<Vec<Tensor>> {
     if dim >= x.ndim() {
-        return Err(anyhow!("chunk: dim {} out of range for ndim {}", dim, x.ndim()));
+        return Err(anyhow!(
+            "chunk: dim {} out of range for ndim {}",
+            dim,
+            x.ndim()
+        ));
     }
     let total = x.shape[dim];
     let chunk_size = (total + n_chunks - 1) / n_chunks;
@@ -215,12 +257,19 @@ pub fn chunk(x: &Tensor, n_chunks: usize, dim: usize) -> Result<Vec<Tensor>> {
 // ---------------------------------------------------------------------------
 pub fn narrow(x: &Tensor, dim: usize, start: usize, length: usize) -> Result<Tensor> {
     if dim >= x.ndim() {
-        return Err(anyhow!("narrow: dim {} out of range for ndim {}", dim, x.ndim()));
+        return Err(anyhow!(
+            "narrow: dim {} out of range for ndim {}",
+            dim,
+            x.ndim()
+        ));
     }
     if start + length > x.shape[dim] {
         return Err(anyhow!(
             "narrow: start({}) + length({}) > shape[{}]({})",
-            start, length, dim, x.shape[dim]
+            start,
+            length,
+            dim,
+            x.shape[dim]
         ));
     }
     let src = x.to_vec();
@@ -249,7 +298,11 @@ pub fn expand(x: &Tensor, target_shape: &[usize]) -> Result<Tensor> {
     let ndim_x = x.ndim();
     let ndim_t = target_shape.len();
     if ndim_t < ndim_x {
-        return Err(anyhow!("expand: target ndim {} < source ndim {}", ndim_t, ndim_x));
+        return Err(anyhow!(
+            "expand: target ndim {} < source ndim {}",
+            ndim_t,
+            ndim_x
+        ));
     }
     let pad = ndim_t - ndim_x;
     let src = x.to_vec();
@@ -350,6 +403,9 @@ mod tests {
         let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![1, 3]).unwrap();
         let y = expand(&x, &[4, 3]).unwrap();
         assert_eq!(y.shape, vec![4, 3]);
-        assert_eq!(y.to_vec(), vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+        assert_eq!(
+            y.to_vec(),
+            vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+        );
     }
 }

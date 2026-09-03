@@ -62,11 +62,11 @@ impl MultiHeadAttention {
             // the active implementation until the device-side path is proven stable.
             let context = {
                 let mut context_guard = self.cuda_context.lock().unwrap();
-                    *context_guard = Some(Arc::new(darkforest_cuda::AttentionContext::new(
-                        1,
-                        seq_len,
-                        self.d_head,
-                    )?));
+                *context_guard = Some(Arc::new(darkforest_cuda::AttentionContext::new(
+                    1,
+                    seq_len,
+                    self.d_head,
+                )?));
 
                 context_guard.as_ref().unwrap().clone()
             };

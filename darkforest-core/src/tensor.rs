@@ -208,7 +208,8 @@ impl Tensor {
             return Tensor {
                 storage: Arc::new(RwLock::new(TensorData {
                     storage: Storage::Cuda(
-                        darkforest_cuda::DeviceTensor::ones(shape.clone()).expect("CUDA ones failed"),
+                        darkforest_cuda::DeviceTensor::ones(shape.clone())
+                            .expect("CUDA ones failed"),
                     ),
                 })),
                 grad: None,

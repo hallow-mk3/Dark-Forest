@@ -48,11 +48,16 @@ fn get_cublas_handle() -> Result<*mut std::ffi::c_void> {
         const WORKSPACE_BYTES: usize = 32 * 1024 * 1024;
         let mut workspace: *mut std::ffi::c_void = std::ptr::null_mut();
         let ws_status = unsafe { cuda_alloc::cudaMalloc(&mut workspace, WORKSPACE_BYTES) };
-        assert!(ws_status == 0, "cudaMalloc for cuBLAS workspace failed: {ws_status}");
-        let set_ws_status = unsafe {
-            cublas::cublasSetWorkspace_v2(handle, workspace, WORKSPACE_BYTES)
-        };
-        assert!(set_ws_status == 0, "cublasSetWorkspace_v2 failed: {set_ws_status}");
+        assert!(
+            ws_status == 0,
+            "cudaMalloc for cuBLAS workspace failed: {ws_status}"
+        );
+        let set_ws_status =
+            unsafe { cublas::cublasSetWorkspace_v2(handle, workspace, WORKSPACE_BYTES) };
+        assert!(
+            set_ws_status == 0,
+            "cublasSetWorkspace_v2 failed: {set_ws_status}"
+        );
         CublasState { handle, workspace }
     });
 
@@ -71,7 +76,11 @@ mod cublas {
         pub fn cublasCreate_v2(handle: *mut *mut c_void) -> i32;
         pub fn cublasSetMathMode(handle: *mut c_void, mode: i32) -> i32;
         pub fn cublasSetStream_v2(handle: *mut c_void, stream: *mut c_void) -> i32;
-        pub fn cublasSetWorkspace_v2(handle: *mut c_void, workspace: *mut c_void, workspace_size_in_bytes: usize) -> i32;
+        pub fn cublasSetWorkspace_v2(
+            handle: *mut c_void,
+            workspace: *mut c_void,
+            workspace_size_in_bytes: usize,
+        ) -> i32;
         pub fn cublasDestroy_v2(handle: *mut c_void) -> i32;
         pub fn cublasSgemm_v2(
             handle: *mut c_void,
@@ -723,7 +732,11 @@ impl DeviceTensor {
         Ok(grad_x)
     }
 
-    pub fn gelu_backward_into(&self, grad_out: &DeviceTensor, out: &mut DeviceTensor) -> Result<()> {
+    pub fn gelu_backward_into(
+        &self,
+        grad_out: &DeviceTensor,
+        out: &mut DeviceTensor,
+    ) -> Result<()> {
         if self.shape != grad_out.shape || self.shape != out.shape {
             return Err(anyhow!("DeviceTensor::gelu_backward_into shape mismatch"));
         }
@@ -735,7 +748,6 @@ impl DeviceTensor {
         )?;
         Ok(())
     }
-
 
     pub fn add_bias(&self, bias: &DeviceTensor) -> Result<DeviceTensor> {
         if self.shape.is_empty() || bias.shape.len() != 1 {
@@ -778,7 +790,8 @@ impl DeviceTensor {
         }
         let u32_indices: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
         let allocator = Arc::new(memory::GpuAllocator);
-        let idx_buf = memory::CudaBuffer::new(indices.len() * std::mem::size_of::<u32>(), allocator)?;
+        let idx_buf =
+            memory::CudaBuffer::new(indices.len() * std::mem::size_of::<u32>(), allocator)?;
         idx_buf.upload_bytes(
             u32_indices.as_ptr() as *const u8,
             indices.len() * std::mem::size_of::<u32>(),
@@ -927,15 +940,17 @@ impl DeviceTensor {
             means.as_ptr(),
             rstds.as_ptr(),
             grad_x.as_mut_ptr(),
-            grad_gamma.as_mut().map_or(std::ptr::null_mut(), |g| g.as_mut_ptr()),
-            grad_beta.as_mut().map_or(std::ptr::null_mut(), |b| b.as_mut_ptr()),
+            grad_gamma
+                .as_mut()
+                .map_or(std::ptr::null_mut(), |g| g.as_mut_ptr()),
+            grad_beta
+                .as_mut()
+                .map_or(std::ptr::null_mut(), |b| b.as_mut_ptr()),
             batch,
             features,
         )?;
         Ok(())
     }
-
-
 
     pub fn linear(
         &self,
@@ -967,7 +982,10 @@ impl DeviceTensor {
         bias: Option<&DeviceTensor>,
         out: &mut DeviceTensor,
     ) -> Result<()> {
-        if self.shape.len() != 2 || weight.shape.len() != 2 || out.shape != vec![self.shape[0], weight.shape[0]] {
+        if self.shape.len() != 2
+            || weight.shape.len() != 2
+            || out.shape != vec![self.shape[0], weight.shape[0]]
+        {
             return Err(anyhow!("linear_into shape mismatch"));
         }
         let batch = self.shape[0];
@@ -1014,7 +1032,13 @@ impl DeviceTensor {
                 return Err(anyhow!("cublasSgemm_v2 failed with code {status}"));
             }
             if let Some(b) = bias {
-                kernels::cuda_add_bias(out.as_ptr(), b.as_ptr(), out.as_mut_ptr(), batch, out_features)?;
+                kernels::cuda_add_bias(
+                    out.as_ptr(),
+                    b.as_ptr(),
+                    out.as_mut_ptr(),
+                    batch,
+                    out_features,
+                )?;
             }
             return Ok(());
         }
@@ -1046,12 +1070,18 @@ impl DeviceTensor {
         weight: &DeviceTensor,
         bias: Option<&DeviceTensor>,
         out: &mut DeviceTensor,
-        x_bf16: &mut memory::CudaBuffer,  // scratch: [batch * in_features] bf16
-        w_bf16: &mut memory::CudaBuffer,  // scratch: [out_features * in_features] bf16
+        x_bf16: &mut memory::CudaBuffer, // scratch: [batch * in_features] bf16
+        w_bf16: &mut memory::CudaBuffer, // scratch: [out_features * in_features] bf16
     ) -> Result<()> {
-        let in_features = *self.shape.last().ok_or_else(|| anyhow!("linear_bf16: empty x shape"))?;
-        let batch       = self.numel() / in_features;
-        let out_features = *weight.shape.first().ok_or_else(|| anyhow!("linear_bf16: empty weight shape"))?;
+        let in_features = *self
+            .shape
+            .last()
+            .ok_or_else(|| anyhow!("linear_bf16: empty x shape"))?;
+        let batch = self.numel() / in_features;
+        let out_features = *weight
+            .shape
+            .first()
+            .ok_or_else(|| anyhow!("linear_bf16: empty weight shape"))?;
 
         if out.numel() != batch * out_features {
             return Err(anyhow!("linear_bf16: output shape mismatch"));
@@ -1068,7 +1098,7 @@ impl DeviceTensor {
 
             let handle = get_cublas_handle()?;
             let alpha = 1.0f32;
-            let beta  = 0.0f32;
+            let beta = 0.0f32;
 
             // C [batch, out_f] = X [batch, in_f] @ W^T [in_f, out_f]
             // cublas col-major:  C^T = W @ X^T
@@ -1097,7 +1127,13 @@ impl DeviceTensor {
                 return Err(anyhow!("cublasGemmEx BF16 failed with code {status}"));
             }
             if let Some(b) = bias {
-                kernels::cuda_add_bias(out.as_ptr(), b.as_ptr(), out.as_mut_ptr(), batch, out_features)?;
+                kernels::cuda_add_bias(
+                    out.as_ptr(),
+                    b.as_ptr(),
+                    out.as_mut_ptr(),
+                    batch,
+                    out_features,
+                )?;
             }
             return Ok(());
         }
@@ -1498,7 +1534,10 @@ impl DeviceTensor {
         probs: &mut DeviceTensor,
         loss: &mut DeviceTensor,
     ) -> Result<()> {
-        let cols = *logits.shape.last().ok_or_else(|| anyhow!("cross entropy empty shape"))?;
+        let cols = *logits
+            .shape
+            .last()
+            .ok_or_else(|| anyhow!("cross entropy empty shape"))?;
         let rows = logits.numel() / cols;
         probs.copy_from(logits)?;
         kernels::cuda_softmax(probs.as_mut_ptr(), rows, cols)?;
@@ -1518,7 +1557,10 @@ impl DeviceTensor {
         grad_output: &DeviceTensor,
         grad_logits: &mut DeviceTensor,
     ) -> Result<()> {
-        let cols = *probs.shape.last().ok_or_else(|| anyhow!("cross entropy empty shape"))?;
+        let cols = *probs
+            .shape
+            .last()
+            .ok_or_else(|| anyhow!("cross entropy empty shape"))?;
         let rows = probs.numel() / cols;
         kernels::cuda_cross_entropy_backward(
             probs.as_ptr(),
@@ -1541,7 +1583,10 @@ impl DeviceTensor {
         grad_logits: &mut DeviceTensor,
         loss: &mut DeviceTensor,
     ) -> Result<()> {
-        let cols = *logits.shape.last().ok_or_else(|| anyhow!("fused logit_ce empty shape"))?;
+        let cols = *logits
+            .shape
+            .last()
+            .ok_or_else(|| anyhow!("fused logit_ce empty shape"))?;
         let rows = logits.numel() / cols;
         kernels::cuda_fused_logit_ce(
             logits.as_mut_ptr(),
@@ -1576,7 +1621,9 @@ impl AttentionContext {
         if d_head == 0 || d_head > 128 {
             return Err(anyhow!("d_head must be in the range 1..=128"));
         }
-        let d_model = n_heads.checked_mul(d_head).ok_or_else(|| anyhow!("d_model overflow"))?;
+        let d_model = n_heads
+            .checked_mul(d_head)
+            .ok_or_else(|| anyhow!("d_model overflow"))?;
         let elements = seq_len
             .checked_mul(d_model)
             .ok_or_else(|| anyhow!("attention shape is too large"))?;
@@ -1721,7 +1768,6 @@ impl AttentionContext {
         }
         Ok(())
     }
-
 
     pub fn forward(
         &self,
@@ -2081,7 +2127,10 @@ mod tests {
             out
         };
         for (actual, expected) in actual.iter().zip(expected.iter()) {
-            assert!((actual - expected).abs() <= 1e-5, "actual={actual}, expected={expected}");
+            assert!(
+                (actual - expected).abs() <= 1e-5,
+                "actual={actual}, expected={expected}"
+            );
         }
     }
 

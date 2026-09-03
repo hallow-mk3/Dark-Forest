@@ -813,3 +813,271 @@ pub fn cuda_fused_mha_backward(
     Err(anyhow::Error::msg("CUDA kernels not compiled"))
 }
 
+pub fn cuda_f32_to_bf16(src: *const f32, dst: *mut u16, n: usize) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_f32_to_bf16(src: *const f32, dst: *mut u16, n: u32);
+        }
+        launch_f32_to_bf16(src, dst, n as u32);
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+pub fn cuda_bf16_to_f32(src: *const u16, dst: *mut f32, n: usize) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_bf16_to_f32(src: *const u16, dst: *mut f32, n: u32);
+        }
+        launch_bf16_to_f32(src, dst, n as u32);
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+pub fn cuda_dequantize_nf4_to_f32(
+    packed_indices: *const u8,
+    scales: *const f32,
+    out_weights: *mut f32,
+    total_weights: usize,
+    block_size: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_dequantize_nf4_to_f32(
+                packed_indices: *const u8,
+                scales: *const f32,
+                out_weights: *mut f32,
+                total_weights: u32,
+                block_size: u32,
+            );
+        }
+        launch_dequantize_nf4_to_f32(
+            packed_indices,
+            scales,
+            out_weights,
+            total_weights as u32,
+            block_size as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+pub fn cuda_dequantize_nf4_to_bf16(
+    packed_indices: *const u8,
+    scales: *const f32,
+    out_weights: *mut u16,
+    total_weights: usize,
+    block_size: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_dequantize_nf4_to_bf16(
+                packed_indices: *const u8,
+                scales: *const f32,
+                out_weights: *mut u16,
+                total_weights: u32,
+                block_size: u32,
+            );
+        }
+        launch_dequantize_nf4_to_bf16(
+            packed_indices,
+            scales,
+            out_weights,
+            total_weights as u32,
+            block_size as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+pub fn cuda_matmul_nf4_fused(
+    a: *const f32,
+    w_packed: *const u8,
+    scales: *const f32,
+    c: *mut f32,
+    m: usize,
+    k: usize,
+    n: usize,
+    block_size: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_matmul_nf4_fused(
+                a: *const f32,
+                w_packed: *const u8,
+                scales: *const f32,
+                c: *mut f32,
+                m: u32,
+                k: u32,
+                n: u32,
+                block_size: u32,
+            );
+        }
+        launch_matmul_nf4_fused(
+            a,
+            w_packed,
+            scales,
+            c,
+            m as u32,
+            k as u32,
+            n as u32,
+            block_size as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+pub fn cuda_rmsnorm(
+    x: *const f32,
+    gamma: *const f32,
+    out: *mut f32,
+    rstds: *mut f32,
+    batch: usize,
+    features: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_rmsnorm(
+                x: *const f32,
+                gamma: *const f32,
+                out: *mut f32,
+                rstds: *mut f32,
+                batch: u32,
+                features: u32,
+            );
+        }
+        launch_rmsnorm(x, gamma, out, rstds, batch as u32, features as u32);
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// RMSNorm backward pass — gradient w.r.t. x and gamma.
+/// Completes the differentiable RMSNorm module for end-to-end backpropagation.
+///
+/// The closed-form gradient avoids re-materializing normalized activations:
+///   dL/dx_i = rstd * (dy_i*gamma_i - (rstd²/N) * dot(dy*gamma, x) * x_i)
+pub fn cuda_rmsnorm_backward(
+    grad_out: *const f32,
+    x: *const f32,
+    gamma: *const f32,
+    rstds: *const f32,
+    grad_x: *mut f32,
+    grad_gamma: *mut f32,
+    batch: usize,
+    features: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_rmsnorm_backward(
+                grad_out: *const f32,
+                x: *const f32,
+                gamma: *const f32,
+                rstds: *const f32,
+                grad_x: *mut f32,
+                grad_gamma: *mut f32,
+                batch: u32,
+                features: u32,
+            );
+        }
+        launch_rmsnorm_backward(
+            grad_out,
+            x,
+            gamma,
+            rstds,
+            grad_x,
+            grad_gamma,
+            batch as u32,
+            features as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// Speculative Decoding: verify K draft tokens against target distribution in a single GPU pass.
+///
+/// Based on: Leviathan et al., "Fast Inference from Transformers via Speculative Decoding", 2023.
+/// Replaces K sequential target-model forward passes with 1 batched verification pass.
+/// Returns per-token acceptance mask and the total count of accepted draft tokens.
+pub fn cuda_speculative_verify(
+    target_probs: *const f32,
+    draft_probs: *const f32,
+    draft_tokens: *const u32,
+    accept_mask: *mut f32,
+    n_accepted: *mut u32,
+    threshold: f32,
+    k: usize,
+    vocab_size: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_speculative_verify(
+                target_probs: *const f32,
+                draft_probs: *const f32,
+                draft_tokens: *const u32,
+                accept_mask: *mut f32,
+                n_accepted: *mut u32,
+                threshold: f32,
+                k: u32,
+                vocab_size: u32,
+            );
+        }
+        launch_speculative_verify(
+            target_probs,
+            draft_probs,
+            draft_tokens,
+            accept_mask,
+            n_accepted,
+            threshold,
+            k as u32,
+            vocab_size as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// Gradient Checkpointing: elementwise scale for recomputed activations.
+///
+/// Based on: Chen et al., "Training Deep Nets with Sublinear Memory Cost", 2016.
+/// Enables O(sqrt(L)) activation memory by recomputing forward activations on demand
+/// during the backward pass. This kernel applies the necessary scale correction factor.
+/// float4 vectorized for maximum HBM bandwidth utilization on sm_120.
+pub fn cuda_gradient_checkpoint_scale(
+    x: *const f32,
+    out: *mut f32,
+    scale: f32,
+    n: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_gradient_checkpoint_scale(x: *const f32, out: *mut f32, scale: f32, n: u32);
+        }
+        launch_gradient_checkpoint_scale(x, out, scale, n as u32);
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
