@@ -21,6 +21,10 @@ path = "src/bin/train_gpt2_small.rs"
 name = "train_static"
 path = "src/bin/train_static.rs"
 
+[[bin]]
+name = "bench_sgemm"
+path = "src/bin/bench_sgemm.rs"
+
 [dependencies]
 thiserror  = { workspace = true }
 anyhow     = { workspace = true }

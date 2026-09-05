@@ -127,7 +127,7 @@ fn main() -> Result<()> {
     let log_every = n_steps.min(50);
 
     let mut loss_log = std::fs::File::create("training_loss_static.csv")?;
-    writeln!(loss_log, "step,loss")?;
+    writeln!(loss_log, "step,loss,rolling_time_ms,step_time_ms")?;
 
     let mut first_loss = None;
     let mut final_loss = 0.0f32;
@@ -150,13 +150,19 @@ fn main() -> Result<()> {
         final_loss = loss_val;
         min_loss = min_loss.min(loss_val);
 
-        if step % log_every == 0 || step == 1 {
-            writeln!(loss_log, "{},{:.6}", step, loss_val)?;
-            let tok_s = (ctx_len as f64 / elapsed_ms) * 1000.0;
+        if step == 1 {
+            println!("step {:5} | loss {:6.4} | step_time {:6.2}ms | {:.0} tok/s", step, loss_val, elapsed_ms, (ctx_len as f64 / elapsed_ms) * 1000.0);
+            writeln!(loss_log, "{},{:.6},{:.3},{:.3}", step, loss_val, loss_val, elapsed_ms)?;
+        } else if step % 25 == 0 || step == n_steps {
+            let window_start = step.saturating_sub(25);
+            let recent_times = &step_times_ms[window_start..step];
+            let rolling_time_ms: f64 = recent_times.iter().sum::<f64>() / recent_times.len() as f64;
+            let tok_s = (ctx_len as f64 / rolling_time_ms) * 1000.0;
             println!(
-                "step {:5} | loss {:6.4} | step_time {:6.2}ms | {:.0} tok/s",
-                step, loss_val, elapsed_ms, tok_s
+                "step {:5} | loss {:6.4} | rolling_step {:6.2}ms | instantaneous {:6.2}ms | {:.0} tok/s",
+                step, loss_val, rolling_time_ms, elapsed_ms, tok_s
             );
+            writeln!(loss_log, "{},{:.6},{:.3},{:.3}", step, loss_val, rolling_time_ms, elapsed_ms)?;
         }
     }
 

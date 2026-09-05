@@ -11,6 +11,8 @@
 
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 // ---------------------------------------------------------------------------
 // Single sync point — call this ONCE per training step from Rust, not per

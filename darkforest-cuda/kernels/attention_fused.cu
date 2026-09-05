@@ -272,32 +272,34 @@ __global__ void kernel_attention_bwd_tiled(
     float d_prob_sum = __shfl_sync(0xffffffff, local_d_prob_sum, 0);
 
     // --- Step 4: Compute dQ and accumulate dK, dV ---
-    // dp = dot(dOut_i, V_k) is the same scalar for all d dimensions.
-    // Use a warp-cooperative partial sum (each lane handles its assigned d-slots)
-    // then reduce with warp_reduce_sum so all lanes share the same dp value.
+    // Zero out dQ for this thread's d-lanes
     for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-        float q_d    = __ldg(&q_row[d]);
-        float dout_d = __ldg(&dout_row[d]);
-        float acc_dq = 0.0f;
+        dQ[(size_t)q_idx * d_head + d] = 0.0f;
+    }
 
-        for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-            const float* v_row = V + (size_t)k_idx * d_head;
-            const float* k_row = K + (size_t)k_idx * d_head;
+    // Outer loop over keys k_idx so the full dot(dOut_i, V_k) is computed cooperatively once
+    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+        const float* v_row = V + (size_t)k_idx * d_head;
+        const float* k_row = K + (size_t)k_idx * d_head;
 
-            // Warp-cooperative dp: each lane sums its d-slots, then reduce.
-            float partial_dp = __ldg(&dout_row[d]) * __ldg(&v_row[d]);
-            float dp = warp_reduce_sum(partial_dp);       // correct scalar on lane 0
-            dp = __shfl_sync(0xffffffff, dp, 0);           // broadcast to all lanes
+        // Compute full dp = dot(dOut_i, V_k) across all d
+        float partial_dp = 0.0f;
+        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
+            partial_dp += __ldg(&dout_row[d]) * __ldg(&v_row[d]);
+        }
+        float dp = warp_reduce_sum(partial_dp);
+        dp = __shfl_sync(0xffffffff, dp, 0);
 
-            float p_val   = prob_row[k_idx];
-            float d_score = p_val * (dp - d_prob_sum);
+        float p_val   = prob_row[k_idx];
+        float d_score = p_val * (dp - d_prob_sum);
 
-            acc_dq += d_score * __ldg(&k_row[d]);
+        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
+            float q_d    = __ldg(&q_row[d]);
+            float dout_d = __ldg(&dout_row[d]);
+            dQ[(size_t)q_idx * d_head + d] += scale * d_score * __ldg(&k_row[d]);
             atomicAdd(&dK[(size_t)k_idx * d_head + d], scale * d_score * q_d);
             atomicAdd(&dV[(size_t)k_idx * d_head + d], p_val * dout_d);
         }
-
-        dQ[(size_t)q_idx * d_head + d] = scale * acc_dq;
     }
 }
 
@@ -408,29 +410,32 @@ __global__ void kernel_mha_bwd_tiled(
     float d_prob_sum = __shfl_sync(0xffffffff, local_d_prob_sum, 0);
 
     // --- Step 4: Compute dQ and accumulate dK, dV in parallel across d ---
-    // Warp-cooperative dp: each lane contributes its d-slot to the reduction.
     for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-        float q_d    = __ldg(&q_row[d]);
-        float dout_d = __ldg(&dout_row[d]);
-        float acc_dq = 0.0f;
+        dQ[(size_t)q_idx * d_model + head_offset + d] = 0.0f;
+    }
 
-        for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-            const float* k_row = K + (size_t)k_idx * d_model + head_offset;
-            const float* v_row = V + (size_t)k_idx * d_model + head_offset;
+    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+        const float* k_row = K + (size_t)k_idx * d_model + head_offset;
+        const float* v_row = V + (size_t)k_idx * d_model + head_offset;
 
-            float partial_dp = __ldg(&dout_row[d]) * __ldg(&v_row[d]);
-            float dp = warp_reduce_sum(partial_dp);       // correct scalar on lane 0
-            dp = __shfl_sync(0xffffffff, dp, 0);           // broadcast to all lanes
+        // Compute full dp = dot(dOut_i, V_k) across all d
+        float partial_dp = 0.0f;
+        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
+            partial_dp += __ldg(&dout_row[d]) * __ldg(&v_row[d]);
+        }
+        float dp = warp_reduce_sum(partial_dp);
+        dp = __shfl_sync(0xffffffff, dp, 0);
 
-            float p_val   = prob_row[k_idx];
-            float d_score = p_val * (dp - d_prob_sum);
+        float p_val   = prob_row[k_idx];
+        float d_score = p_val * (dp - d_prob_sum);
 
-            acc_dq += d_score * __ldg(&k_row[d]);
+        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
+            float q_d    = __ldg(&q_row[d]);
+            float dout_d = __ldg(&dout_row[d]);
+            dQ[(size_t)q_idx * d_model + head_offset + d] += scale * d_score * __ldg(&k_row[d]);
             atomicAdd(&dK[(size_t)k_idx * d_model + head_offset + d], scale * d_score * q_d);
             atomicAdd(&dV[(size_t)k_idx * d_model + head_offset + d], p_val * dout_d);
         }
-
-        dQ[(size_t)q_idx * d_model + head_offset + d] = scale * acc_dq;
     }
 }
 

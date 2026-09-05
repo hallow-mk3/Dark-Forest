@@ -30,50 +30,40 @@ fn find_cuda_root() -> PathBuf {
 
 fn find_cl_from_vs() -> Option<PathBuf> {
     let roots = [
-        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio"),
-        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\2022\Community"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\2022\Professional"),
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"),
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\2019\Community"),
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community"),
     ];
 
     for root in roots {
-        if !root.exists() {
+        let candidate = root.join("VC").join("Tools").join("MSVC");
+        if !candidate.exists() {
             continue;
         }
 
-        let mut stack = vec![root];
-        while let Some(dir) = stack.pop() {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        stack.push(path);
-                    }
+        if let Ok(entries) = std::fs::read_dir(&candidate) {
+            for entry in entries.flatten() {
+                let versioned = entry.path();
+                let cl = versioned
+                    .join("bin")
+                    .join("Hostx64")
+                    .join("x64")
+                    .join("cl.exe");
+                if cl.exists() {
+                    return Some(cl);
                 }
-            }
-
-            let candidate = dir.join("VC").join("Tools").join("MSVC");
-            if !candidate.exists() {
-                continue;
-            }
-
-            if let Ok(entries) = std::fs::read_dir(&candidate) {
-                for entry in entries.flatten() {
-                    let versioned = entry.path();
-                    let cl = versioned
-                        .join("bin")
-                        .join("Hostx64")
-                        .join("x64")
-                        .join("cl.exe");
-                    if cl.exists() {
-                        return Some(cl);
-                    }
-                    let cl_alt = versioned
-                        .join("bin")
-                        .join("Hostx86")
-                        .join("x64")
-                        .join("cl.exe");
-                    if cl_alt.exists() {
-                        return Some(cl_alt);
-                    }
+                let cl_alt = versioned
+                    .join("bin")
+                    .join("Hostx86")
+                    .join("x64")
+                    .join("cl.exe");
+                if cl_alt.exists() {
+                    return Some(cl_alt);
                 }
             }
         }
@@ -83,6 +73,14 @@ fn find_cl_from_vs() -> Option<PathBuf> {
 }
 
 fn find_cl() -> Option<PathBuf> {
+    if let Ok(msvc_path) = std::env::var("MSVC_PATH") {
+        let p = PathBuf::from(msvc_path);
+        let cl = if p.is_file() { p } else { p.join("bin").join("Hostx64").join("x64").join("cl.exe") };
+        if cl.exists() {
+            return Some(cl);
+        }
+    }
+
     if let Ok(output) = std::process::Command::new("where.exe")
         .arg("cl.exe")
         .output()
@@ -119,11 +117,13 @@ fn main() {
 
     let cl = find_cl();
     if cl.is_none() {
-        println!("cargo:warning=MSVC compiler (cl.exe) was not found in the PATH or standard Visual Studio installation directories. CUDA kernel compilation skipped.");
-        println!("cargo:warning=Activate the Visual Studio C++ build environment or install CUDA build tools before enabling GPU support.");
+        println!("cargo:warning=MSVC compiler (cl.exe) was not found. CUDA kernel compilation skipped.");
         return;
     }
 
+    let cl_path = cl.as_ref().unwrap();
+    println!("cargo:warning=Using NVCC: {}", nvcc.display());
+    println!("cargo:warning=Using MSVC cl.exe: {}", cl_path.display());
     println!("cargo:rustc-cfg=darkforest_cuda_kernels");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -184,6 +184,12 @@ fn main() {
     }
 
     let lib_name = "darkforest_kernels";
+    let is_msvc = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc";
+    let lib_filename = if is_msvc {
+        format!("{lib_name}.lib")
+    } else {
+        format!("lib{lib_name}.a")
+    };
     let mut command = std::process::Command::new(&nvcc);
     command
         .env("PATH", &path_value)
@@ -192,7 +198,7 @@ fn main() {
         .args([
             "--lib",
             "-o",
-            out_dir.join(format!("lib{lib_name}.a")).to_str().unwrap(),
+            out_dir.join(&lib_filename).to_str().unwrap(),
         ])
         .args(kernels.iter().map(|k| {
             out_dir

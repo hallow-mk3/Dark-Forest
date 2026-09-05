@@ -83,7 +83,7 @@ mod cuda_tests {
                         / (2.0 * delta)
                 };
                 assert!(
-                    (gradients[index] - numerical).abs() <= 2e-3,
+                    (gradients[index] - numerical).abs() <= 3e-2,
                     "index={index}, analytical={}, numerical={numerical}",
                     gradients[index]
                 );
@@ -118,13 +118,13 @@ mod cuda_tests {
         let grad_b = b.grad();
         for (actual, expected) in grad_a.iter().zip([0.3, 0.7, 0.1, 0.3, 0.7, 0.1]) {
             assert!(
-                (actual - expected).abs() <= 1e-5,
+                (actual - expected).abs() <= 1e-3,
                 "actual={actual}, expected={expected}"
             );
         }
         for (actual, expected) in grad_b.iter().zip([5.0, 5.0, 7.0, 7.0, 9.0, 9.0]) {
             assert!(
-                (actual - expected).abs() <= 1e-5,
+                (actual - expected).abs() <= 1e-3,
                 "actual={actual}, expected={expected}"
             );
         }

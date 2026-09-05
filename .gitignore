@@ -23,9 +23,6 @@ benchmark_results.json
 training_loss*.csv
 benchmark/*.json
 
-# Documentation / research notes
-docs/
-
 # Transient execution logs & traces
 *.log
 

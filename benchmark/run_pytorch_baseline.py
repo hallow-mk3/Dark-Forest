@@ -47,7 +47,7 @@ class PyTorchGPT2Small(nn.Module):
         logits = self.head(x)
         return logits
 
-def benchmark_pytorch(steps=20, seq_len=128, batch_size=2, warmup_steps=10, repeats=5):
+def benchmark_pytorch(steps=20, seq_len=128, batch_size=1, warmup_steps=5, repeats=5, vocab_size=50257, d_model=768, n_heads=12, n_layers=12):
     torch.manual_seed(0)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
@@ -60,19 +60,19 @@ def benchmark_pytorch(steps=20, seq_len=128, batch_size=2, warmup_steps=10, repe
     print(f"\n=======================================================")
     print(f" PyTorch Baseline Benchmark (Device: {device})")
     print(f"=======================================================")
-    print(f"Config: vocab=256, d_model=128, n_heads=1, n_layers=4, seq_len={seq_len}, batch_size={batch_size}, ff=512, max_len=512")
+    print(f"Config: vocab={vocab_size}, d_model={d_model}, n_heads={n_heads}, n_layers={n_layers}, seq_len={seq_len}, batch_size={batch_size}")
 
-    model = PyTorchGPT2Small(vocab_size=256, d_model=128, n_heads=1, n_layers=4, max_len=512).to(device)
+    model = PyTorchGPT2Small(vocab_size=vocab_size, d_model=d_model, n_heads=n_heads, n_layers=n_layers, max_len=max(1024, seq_len)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = nn.CrossEntropyLoss()
 
-    inputs = torch.randint(0, 256, (batch_size, seq_len), device=device)
-    targets = torch.randint(0, 256, (batch_size, seq_len), device=device)
+    inputs = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+    targets = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
 
     for _ in range(warmup_steps):
         optimizer.zero_grad()
         out = model(inputs)
-        loss = loss_fn(out.view(-1, 256), targets.view(-1))
+        loss = loss_fn(out.view(-1, vocab_size), targets.view(-1))
         loss.backward()
         optimizer.step()
 
