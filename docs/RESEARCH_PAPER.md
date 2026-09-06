@@ -112,62 +112,42 @@ Any structural gradient bug (like transposed dimensions, missing scaling factors
 
 I ran all benchmarks on an **NVIDIA GeForce RTX 5070 Laptop GPU** under an active **85 percent maximum VRAM limit (6.77 GB ceiling)** to guarantee hardware safety. I enforced a 60-second cooldown period between runs to maintain thermal steady-state.
 
-### 4.1 Experiment 1: Attention Sequence Scaling & Memory Reduction (Verified Dual Runs)
+### 4.1 Experiment 1: Attention Sequence Scaling & Memory Reduction
 *Configuration: Batch Size = 2, Heads = 12, Head Dimension = 64, Precision = Float32. Hardware: NVIDIA GeForce RTX 5070 Laptop GPU (85 percent VRAM cap = 6.77 GB).*
 
-I tested computational throughput and peak memory allocations across two different power states (AC charging vs. Battery throttled) from sequence length 64 to 8192. I directly compared standard materialized attention (quadratic memory footprint) against tiled online softmax execution (linear memory footprint):
+I tested computational throughput and peak memory allocations across 4 independent sweeps from S=64 to S=8192. I directly compared standard materialized attention (quadratic memory footprint) against tiled online softmax execution (linear memory footprint):
 
-#### A. High-Power AC Charging Run (Peak Clock State)
-| Sequence Length (S) | Standard Attention Latency | Fused Online Softmax Latency | Speedup | Standard Peak VRAM | Fused Peak VRAM | Memory Savings |
+| Sequence Length (S) | Standard Attention Latency (Median) | Fused Online Softmax Latency (Median) | Speedup | Standard Peak VRAM | Fused Peak VRAM | Memory Savings |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **256** | `0.200 ms` | **`0.074 ms`** | **2.70x** | `27.88 MB` | **`15.62 MB`** | **9.2x** |
-| **512** | `0.682 ms` | **`0.197 ms`** | **3.45x** | `72.12 MB` | **`23.12 MB`** | **17.3x** |
-| **1024** | `2.749 ms` | **`0.593 ms`** | **4.64x** | `234.12 MB` | **`38.12 MB`** | **33.7x** |
-| **2048** | `11.452 ms` | **`2.025 ms`** | **5.66x** | `852.12 MB` | **`68.12 MB`** | **66.3x** |
-| **4096** | `45.387 ms` | **`7.360 ms`** | **6.17x** | `3,264.12 MB` | **`128.12 MB`** | **131.7x** |
-| **8192** | **OOM (Ran out of memory)** | **`28.483 ms`** | **Deterministic** | **OOM (>6.77 GB)** | **`248.12 MB`** | **Hardware Bounded** |
-
-#### B. Battery Power-Throttled Run (Constrained State)
-| Sequence Length (S) | Standard Attention Latency | Fused Online Softmax Latency | Speedup | Standard Peak VRAM | Fused Peak VRAM | Memory Savings |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **256** | `0.325 ms` | **`0.117 ms`** | **2.78x** | `27.88 MB` | **`15.62 MB`** | **9.2x** |
-| **512** | `1.194 ms` | **`0.262 ms`** | **4.56x** | `72.12 MB` | **`23.12 MB`** | **17.3x** |
-| **1024** | `6.406 ms` | **`0.909 ms`** | **7.04x** | `234.12 MB` | **`38.12 MB`** | **33.7x** |
-| **2048** | `33.624 ms` | **`4.364 ms`** | **7.70x** | `852.12 MB` | **`68.12 MB`** | **66.3x** |
-| **4096** | `165.821 ms` | **`17.610 ms`** | **9.42x** | `3,264.12 MB` | **`128.12 MB`** | **131.7x** |
-| **8192** | **OOM (Ran out of memory)** | **`64.008 ms`** | **Deterministic** | **OOM (>6.77 GB)** | **`248.12 MB`** | **Hardware Bounded** |
+| **256** | `0.312 ms` | **`0.123 ms`** | **2.53x** | `30.88 MB` | **`14.12 MB`** | **2.19x** |
+| **512** | `0.899 ms` | **`0.234 ms`** | **3.84x** | `90.12 MB` | **`20.12 MB`** | **4.48x** |
+| **1024** | `8.060 ms` | **`0.872 ms`** | **9.24x** | `318.12 MB` | **`32.12 MB`** | **9.90x** |
+| **2048** | `33.958 ms` | **`4.232 ms`** | **8.02x** | `1,212.12 MB` | **`56.12 MB`** | **21.60x** |
+| **4096** | `158.528 ms` | **`15.875 ms`** | **9.99x** | `4,752.12 MB` | **`104.12 MB`** | **45.64x** |
+| **8192** | **OOM (Ran out of memory)** | **`66.962 ms`** | **Deterministic** | **OOM (>6.77 GB)** | **`200.12 MB`** | **Hardware Bounded** |
 
 #### Analysis & Empirical Findings:
-1. **Computational Advantage Growth**: The execution speedup grows as the sequence length increases, reaching up to **6.17x** on AC power and **9.42x** on battery power at S=4096.
-2. **Memory Divergence**: Total peak VRAM savings multiply significantly, completely dropping the peak allocation from 3,264 MB down to 128 MB at S=4096.
-3. **Reproducible OOM Boundary**: At S=8192, standard naive attention triggers an unrecoverable out-of-memory failure across both power states under the 85 percent VRAM cap. Fused online softmax attention maintains stable execution at **248.12 MB** of peak VRAM in both scenarios.
+1. **Computational Advantage Growth**: The execution speedup grows as the sequence length increases, reaching up to **9.99x** at S=4096.
+2. **Memory Divergence**: Total peak VRAM savings multiply significantly, completely dropping the peak allocation from 4,752.12 MB down to 104.12 MB at S=4096.
+3. **Reproducible OOM Boundary**: At S=8192, standard naive attention triggers an unrecoverable out-of-memory failure under the 85 percent VRAM cap. Fused online softmax attention maintains stable execution at **200.12 MB** of peak VRAM.
 
 ---
 
-### 4.2 Experiment 2: Full GPT-2 Scale Step Latency & Variance (7 Repeated Trials)
+### 4.2 Experiment 2: Full GPT-2 Scale Step Latency & Execution Throughput
 *Configuration: 12 Layers, d_model=768, 12 Heads, d_ff=3072, Vocab 50257, Context 128, Batch 1. Target Hardware: NVIDIA GeForce RTX 5070 Laptop GPU (85 percent VRAM cap = 6.77 GB).*
 
-To protect against measurement noise, thermal variance, and driver anomalies, I measured end-to-end training step latencies across 7 independent, randomized trials under identical power and thermal controls:
+Dark Forest was tested using the `train_static` engine to execute 250 forward and backward training steps. The goal was to prove stable monotonic convergence and record step times without dynamic allocation overhead:
 
-| Trial Index | PyTorch 2.9 (Eager) | Dark Forest (`train_static.exe`) | Run-to-Run Speedup |
-| :--- | :--- | :--- | :--- |
-| **Trial 1** | `63.272 ms` | `39.765 ms` | 1.59x |
-| **Trial 2** | `66.583 ms` | `40.878 ms` | 1.63x |
-| **Trial 3** | `66.749 ms` | `41.648 ms` | 1.60x |
-| **Trial 4** | `73.599 ms` | `41.674 ms` | 1.77x |
-| **Trial 5** | `74.504 ms` | `41.766 ms` | 1.78x |
-| **Trial 6** | `74.565 ms` | `41.890 ms` | 1.78x |
-| **Trial 7** | `75.113 ms` | `42.415 ms` | 1.77x |
-| **Median** | **`73.599 ms`** | **`41.674 ms`** | **`1.77x faster`** |
-| **Sample Mean (avg)** | **`70.626 ms`** | **`41.434 ms`** | **`1.70x faster`** |
-| **Standard Deviation** | **`4.898 ms`** | **`0.850 ms`** | **5.76x tighter variance** |
-| **Distribution Range** | `[63.272, 75.113] ms` | `[39.765, 42.415] ms` | **Zero distributional overlap** |
+| Metric | Dark Forest (`train_static.exe`) |
+| :--- | :--- |
+| **Median Step Time** | **`35.391 ms`** |
+| **Minimum Step Time** | **`33.336 ms`** |
+| **Maximum Step Time** | **`43.585 ms`** |
+| **Loss Descent** | **`11.906` -> `2.679`** |
 
 #### Analysis & Empirical Findings:
-1. **Defensible Speedup**: Dark Forest demonstrates a verified **1.70x (mean) to 1.77x (median)** end-to-end training step advantage over PyTorch 2.9 eager mode on the full 124M-parameter architecture.
-2. **Statistical Significance**: A two-sided Mann-Whitney U test yields U = 0, p < 0.001, confirming the speedup is statistically significant. Cohen's d = 8.35 indicates an exceptionally large effect size.
-3. **Execution Determinism & Reduced Jitter**: The standard deviation of Dark Forest is **5.76x lower** (0.850 ms vs. 4.898 ms). This empirically confirms that static memory pre-allocation successfully eliminates dynamic caching allocator churn and memory fragmentation spikes inherent in PyTorch.
-4. **Distribution Separation**: There is **zero overlap** between the empirical distributions across all 14 trials. PyTorch's fastest recorded run (63.272 ms) remains 49.2 percent slower than Dark Forest's slowest recorded run (42.415 ms).
+1. **Stable Execution Profile**: The step time remains clustered near ~35 ms, indicating that the pre-allocated graph prevents severe latency jitter. 
+2. **Deterministic Monotonic Convergence**: The loss reliably descended from 11.906 to 2.679 over the 250 iterations, confirming mathematical fidelity of the statically scheduled gradients.
 
 ---
 

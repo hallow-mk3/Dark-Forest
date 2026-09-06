@@ -27,6 +27,8 @@ def test_cargo_workspace():
     log_suite("1. Rust Workspace Unit Tests (cargo test --workspace)")
     t0 = time.perf_counter()
     res = subprocess.run(["cargo", "test", "--workspace"], capture_output=True, text=True)
+    with open("logs/cargo_test_workspace.log", "w") as f:
+        f.write(res.stdout + "\n" + res.stderr)
     duration = time.perf_counter() - t0
     if res.returncode != 0:
         print(f"[FAIL] (code {res.returncode}):\n{res.stderr}\n{res.stdout}")
@@ -39,6 +41,7 @@ def test_cargo_workspace():
                 if p == "passed;":
                     passed += int(parts[i - 1])
     print(f"[PASS] {passed} Rust workspace unit tests passed in {duration:.2f}s")
+    print(f"       -> Full log saved to logs/cargo_test_workspace.log")
     return True, passed, duration
 
 
@@ -46,12 +49,15 @@ def test_cargo_grad_check():
     log_suite("2. Autograd & Mathematical Gradient Checks (cargo run --bin grad_check)")
     t0 = time.perf_counter()
     res = subprocess.run(["cargo", "run", "--bin", "grad_check"], capture_output=True, text=True)
+    with open("logs/cargo_grad_check.log", "w") as f:
+        f.write(res.stdout + "\n" + res.stderr)
     duration = time.perf_counter() - t0
     if res.returncode != 0:
         print(f"[FAIL] (code {res.returncode}):\n{res.stderr}\n{res.stdout}")
         return False, 0, duration
     passed = res.stdout.count("PASS")
     print(f"[PASS] {passed} operator gradient checks passed in {duration:.2f}s")
+    print(f"       -> Full log saved to logs/cargo_grad_check.log")
     return True, passed, duration
 
 

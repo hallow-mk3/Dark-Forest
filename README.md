@@ -14,60 +14,37 @@
 I ran all benchmarks directly on my local hardware: **NVIDIA GeForce RTX 5070 Laptop GPU (sm_120 Blackwell, 8 GB GDDR7)**. I put a strict 85 percent memory cap (6.77 GB) on both engines to ensure a fair test.
 
 ### 1. Full GPT-2 Scale Step Latency & Execution Throughput
+### 1. Full GPT-2 Scale Step Latency
 *Configuration: 12 Layers, d_model=768, 12 Heads, d_ff=3072, Vocab 50,257, Context 128, Batch 1, Float32 precision, AdamW optimizer.*
 
-Across repeated independent sessions under varying power states (AC charging vs. power-constrained/throttled states), Dark Forest achieves a **1.70x to 2.05x speedup** (mean ~1.91x) over PyTorch 2.9 eager mode:
+Dark Forest was tested using the `train_static` binary for 250 steps of training. The following metrics were extracted directly from the verified execution log (`training_loss_static.csv`):
 
-| Metric | PyTorch 2.9 (Eager Mode) | Dark Forest (`train_static.exe`) | Empirical Advantage |
-| :--- | :--- | :--- | :--- |
-| **Speedup Ratio Range** | Baseline (1.0x) | **1.70x – 2.05x faster** | **Mean ~1.91x speedup across power states** |
-| **Steady-State Median Step** | `60.125 ms` | **`35.292 ms`** | **1.70x faster** |
-| **Power-Throttled Median Step** | `136.118 ms` | **`68.547 ms`** | **1.99x faster (maintains relative lead)** |
-| **Optimal Sustained Step** | `70.627 ms` | **`34.451 ms`** | **2.05x faster** |
-| **Steady-State Throughput** | `2,129 tok/s` | **`3,627 tok/s`** | **+70.4 percent throughput** |
-| **Step Time Jitter (std dev)** | `4.898 ms` | **`0.850 ms`** | **5.76x tighter variance** |
-| **Loss Descent (All Runs)** | `11.82` -> `3.10` | **`11.82` -> `2.68` (min `2.38`–`2.46`)** | Smooth monotonic convergence |
-| **Memory Allocation** | Dynamic PyTorch caching allocator churn | **Pre-allocated static graph workspace** | Zero heap allocations per step |
+| Metric | Dark Forest (`train_static.exe`) |
+| :--- | :--- |
+| **Median Step Time** | **`35.391 ms`** |
+| **Minimum Step Time** | **`33.336 ms`** |
+| **Maximum Step Time** | **`43.585 ms`** |
+| **Loss Descent** | **`11.906` -> `2.679`** |
 
-*(Timing method: PyTorch measured using hardware `torch.cuda.Event` GPU timers; Dark Forest measured using high-resolution host-synchronized GPU timers. Baseline script: [`benchmark/bench_exact_same_config.py`](benchmark/bench_exact_same_config.py). Raw run logs archived in [`training_loss_static.csv`](training_loss_static.csv) and [`benchmark/`](benchmark/).)*
-
-#### Multi-Session Thermal & Power Robustness (3 Independent Sessions)
-| Session Condition | PyTorch Median Step | Dark Forest Median Step | PyTorch Throughput | Dark Forest Throughput | Speedup Ratio | 74-Check Verification Suite |
-| :--- | :--- | :--- | :--- | :--- | :--- | :---: |
-| **Session 1 (Standard AC)** | `60.125 ms` | `35.292 ms` | `2,129 tok/s` | `3,627 tok/s` | **1.70x** | **PASS** |
-| **Session 2 (Thermal/Power Constrained)** | `132.900 ms` | `67.025 ms` | `963 tok/s` | `1,910 tok/s` | **1.98x** | **PASS** |
-| **Session 3 (Sustained Active Charging)** | `70.627 ms` | `34.451 ms` | `1,812 tok/s` | `3,592 tok/s` | **2.05x** | **PASS** |
-
-*Key finding: While absolute step times scale with hardware thermal and clock throttling (34 ms to 67 ms), the speedup ratio is consistently observed between 1.70x and 2.05x across all tested sessions. This empirically confirms that Dark Forest's performance advantage stems from structural runtime efficiency (zero host-device round trips and static graph pre-allocation) rather than transient thermal conditions.*
+*Note: PyTorch eager mode comparative execution traces were not fully recorded in this repository state. The metrics above represent the deterministic performance of the pre-allocated static graph workspace.*
 
 ---
 
-### 2. Attention Sequence Scaling & Peak VRAM Reduction (Verified Dual Runs)
+### 2. Attention Sequence Scaling & Peak VRAM Reduction
 *Configuration: Batch Size 2, Heads 12, Head Dim 64, Float32, RTX 5070 Laptop GPU (85 percent VRAM cap = 6.77 GB).*
 
-Across both high-power (AC charging) and power-throttled (battery) hardware states, fused online softmax attention achieves a **2.7x to 9.4x kernel speedup** over naive attention while scaling memory linearly O(S) instead of quadratically O(S^2):
+Across 4 independent sweeps, fused online softmax attention achieves up to a **9.99x kernel speedup** over naive attention while scaling memory linearly O(S) instead of quadratically O(S^2):
 
-#### A. High-Power AC Charging Run (Peak Clock State)
-| Sequence Length (S) | Standard Attention Latency | Fused Online Softmax Latency | Speedup | Standard Peak VRAM | Fused Peak VRAM | Memory Savings |
+| Sequence Length (S) | Standard Attention Latency (Median) | Fused Online Softmax Latency (Median) | Speedup | Standard Peak VRAM | Fused Peak VRAM | Memory Savings |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **256** | `0.200 ms` | **`0.074 ms`** | **2.70x** | `27.88 MB` | **`15.62 MB`** | **9.2x** |
-| **512** | `0.682 ms` | **`0.197 ms`** | **3.45x** | `72.12 MB` | **`23.12 MB`** | **17.3x** |
-| **1024** | `2.749 ms` | **`0.593 ms`** | **4.64x** | `234.12 MB` | **`38.12 MB`** | **33.7x** |
-| **2048** | `11.452 ms` | **`2.025 ms`** | **5.66x** | `852.12 MB` | **`68.12 MB`** | **66.3x** |
-| **4096** | `45.387 ms` | **`7.360 ms`** | **6.17x** | `3,264.12 MB` | **`128.12 MB`** | **131.7x** |
-| **8192** | **OOM (Ran out of memory)** | **`28.483 ms`** | **Deterministic** | **OOM (>6.77 GB)** | **`248.12 MB`** | **Hardware Bounded** |
+| **256** | `0.312 ms` | **`0.123 ms`** | **2.53x** | `30.88 MB` | **`14.12 MB`** | **2.19x** |
+| **512** | `0.899 ms` | **`0.234 ms`** | **3.84x** | `90.12 MB` | **`20.12 MB`** | **4.48x** |
+| **1024** | `8.060 ms` | **`0.872 ms`** | **9.24x** | `318.12 MB` | **`32.12 MB`** | **9.90x** |
+| **2048** | `33.958 ms` | **`4.232 ms`** | **8.02x** | `1,212.12 MB` | **`56.12 MB`** | **21.60x** |
+| **4096** | `158.528 ms` | **`15.875 ms`** | **9.99x** | `4,752.12 MB` | **`104.12 MB`** | **45.64x** |
+| **8192** | **OOM (Ran out of memory)** | **`66.962 ms`** | **Deterministic** | **OOM (>6.77 GB)** | **`200.12 MB`** | **Hardware Bounded** |
 
-#### B. Battery Power-Throttled Run (Constrained State)
-| Sequence Length (S) | Standard Attention Latency | Fused Online Softmax Latency | Speedup | Standard Peak VRAM | Fused Peak VRAM | Memory Savings |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **256** | `0.325 ms` | **`0.117 ms`** | **2.78x** | `27.88 MB` | **`15.62 MB`** | **9.2x** |
-| **512** | `1.194 ms` | **`0.262 ms`** | **4.56x** | `72.12 MB` | **`23.12 MB`** | **17.3x** |
-| **1024** | `6.406 ms` | **`0.909 ms`** | **7.04x** | `234.12 MB` | **`38.12 MB`** | **33.7x** |
-| **2048** | `33.624 ms` | **`4.364 ms`** | **7.70x** | `852.12 MB` | **`68.12 MB`** | **66.3x** |
-| **4096** | `165.821 ms` | **`17.610 ms`** | **9.42x** | `3,264.12 MB` | **`128.12 MB`** | **131.7x** |
-| **8192** | **OOM (Ran out of memory)** | **`64.008 ms`** | **Deterministic** | **OOM (>6.77 GB)** | **`248.12 MB`** | **Hardware Bounded** |
-
-*Key finding: At S=8192, naive attention repeatedly triggers an unrecoverable out-of-memory crash across both power envelopes, while fused online softmax sustains stable execution at 248.12 MB. Speedup compounds from 2.7x at S=256 up to 9.4x at S=4096.*
+*Key finding: At S=8192, naive attention repeatedly triggers an unrecoverable out-of-memory crash, while fused online softmax sustains stable execution at 200.12 MB. Speedup compounds non-linearly up to 9.99x at S=4096.*
 
 ---
 
