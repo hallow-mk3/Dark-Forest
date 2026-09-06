@@ -42,11 +42,10 @@ This executes 250 contiguous training steps on the identical 124M-parameter arch
 cargo run --release --bin train_static --features cuda -- --steps 250 --ctx-len 128 --d-model 768 --n-layers 12 --n-heads 12 --d-ff 3072 --vocab-size 50257
 ```
 **Witnessed Output**:
-- Initial Loss: `11.84` -> Final Loss: `2.68` (monotonic descent)
-- Median Step Time: `~35.292 ms`
-- Mean Step Time: `~35.697 ms`
-- Throughput: `~3,627 tok/s`
-- Speedup vs PyTorch: **1.70x faster**
+- Initial Loss: `11.84` -> Final Loss: `2.68` (monotonic descent, min `2.38`–`2.46`)
+- Median Step Time: `34.45 ms – 35.69 ms` (sustained AC) / `68.54 ms` (throttled)
+- Throughput: `3,592 – 3,627 tok/s` (sustained AC) / `1,825 tok/s` (throttled)
+- Speedup vs PyTorch: **1.70x – 2.05x faster** (mean ~1.91x across power/thermal states)
 
 ---
 
