@@ -39,6 +39,12 @@ product_name = _darkforest_py.product_name
 status = _darkforest_py.status
 smoke_test = _darkforest_py.smoke_test
 benchmark_matrix_step = _darkforest_py.benchmark_matrix_step
+cuda_sync = _darkforest_py.cuda_sync
+StaticGPT2 = _darkforest_py.StaticGPT2
+StaticLoRAConfig = _darkforest_py.StaticLoRAConfig
+StaticLoRAGPT2 = _darkforest_py.StaticLoRAGPT2
+EngineConfig = getattr(_darkforest_py, "EngineConfig", None)
+Engine = getattr(_darkforest_py, "Engine", None)
 
 __version__ = version()
 __product_name__ = product_name()
@@ -50,7 +56,15 @@ __all__ = [
     "status",
     "smoke_test",
     "benchmark_matrix_step",
+    "cuda_sync",
+    "StaticGPT2",
+    "StaticLoRAConfig",
+    "StaticLoRAGPT2",
+    "EngineConfig",
+    "Engine",
     "__version__",
     "__product_name__",
     "__status__",
 ]
+
+
