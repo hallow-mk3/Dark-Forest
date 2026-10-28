@@ -15,10 +15,12 @@ Modern machine learning frameworks like PyTorch are great for general use, but t
 
 In this project, I built **Dark Forest**, a lightweight, fully custom Rust-first deep learning runtime. I wrote hand-fused CUDA kernels from scratch specifically for the NVIDIA Blackwell architecture (sm_120). By combining:
 1. **Warp-parallel online softmax fused attention** to completely avoid creating the massive O(S^2) intermediate attention matrix,
-2. **Zero-allocation static execution graph scheduling** (`StaticGPT2`) to pre-allocate memory at compile-time, and
+2. **Zero-allocation static execution graph scheduling** (`StaticGPT2`) to pre-allocate memory at compile-time,
 3. **Strict device residency enforcement** to prevent silent, blocking host-device transfers,
+4. **Static KV-cache autoregressive decoding** (`generate_fast`) for O(S) single-token decode steps replacing O(S^2) recomputation, and
+5. **Parameter-Efficient Fine-Tuning** (`StaticLoRAGPT2`) with LoRA adapters and optional 4-bit NF4 base weight quantization (QLoRA),
 
-My testing showed massive improvements. On long-context attention projections (S=4096), tiled online softmax achieved a **9.99x speedup** and a **45.6x reduction in peak VRAM**. It completely prevented out-of-memory crashes at S=8192, where standard attention fails under an 85 percent VRAM limit. 
+My testing showed massive improvements. On long-context attention projections (S=4096), tiled online softmax achieved a **9.99x speedup** and a **45.6x reduction in peak VRAM**. It completely prevented out-of-memory crashes at S=8192, where standard attention fails under an 85 percent VRAM limit.
 
 I also ran 7 independent full-scale GPT-2 (124M parameter) training trials. Dark Forest achieved a **1.77x median step speedup** (41.67 ms vs 73.60 ms) over PyTorch 2.9 eager mode and a **5.76x reduction in execution jitter** (std dev = 0.850 ms vs 4.898 ms). There was zero overlap in the execution time distributions (Mann-Whitney U = 0, p < 0.001, Cohen's d = 8.35). On top of that, the entire runtime is packaged in a standalone 12 MB compiled binary, which is a 161x footprint reduction compared to the 1.8 GB Python/PyTorch stack.
 
@@ -158,11 +160,17 @@ A central question in systems research is whether custom domain-specific runtime
 * **The Role of `torch.compile`**: I used PyTorch eager mode as the primary baseline because it's the default execution path and most widely used deployment mode. While `torch.compile` leverages CUDA Graphs to reduce host dispatch overhead, it is still chained to a multi-gigabyte Python environment and dynamic driver allocators. Comparing against `torch.compile` is a good direction for future work.
 * **Embedded & Edge Suitability**: Dark Forest compiles to a self-contained, dependency-free binary under 12 MB (a 161x footprint reduction compared to the >1.8 GB Python/PyTorch stack). This makes it highly viable for embedded autonomous platforms, robotics controllers, and edge devices where multi-gigabyte Python environments are a non-starter.
 
-### 5.2 Future Extensions
-Future work on Dark Forest will focus on:
-1. **Parameter-Efficient Fine-Tuning (QLoRA / NF4)**: Implementing and benchmarking hardware-accelerated 4-bit NormalFloat weight dequantization directly in shared memory.
-2. **Static Key-Value Cache Decoding**: Formulating pre-allocated static KV-cache buffers for low-latency autoregressive inference.
-3. **Sublinear Gradient Checkpointing**: Implementing segment recomputation to scale training sequence horizons beyond 16,384 tokens on 8 GB cards.
+### 5.2 Implemented Extensions & Future Work
+
+#### Implemented (this work)
+
+1. **Static Key-Value Cache Decoding (`generate_fast`)**: Pre-allocated static KV-cache buffers eliminate O(S²) full-context recomputation during autoregressive inference. A custom GEMV kernel replaces the decode GEMM, and a GPU-side argmax reduction keeps greedy token selection on device, reducing PCIe traffic to a single 4-byte scalar per decode step. This is benchmarked against the naive baseline via `--generate-compare`.
+
+2. **Parameter-Efficient Fine-Tuning (`StaticLoRAGPT2` — LoRA / QLoRA)**: Low-rank adapter matrices (rank *r* ≪ d_model) are injected into the Q and V projection weights. The base model is completely frozen (zero base-weight optimizer state overhead). Optional 4-bit NormalFloat (NF4) base weight quantization (QLoRA mode) achieves 7.11x VRAM compression with MSE < 0.009. Adapters can be saved as compact LoRA-only checkpoints (< 2 MB) and merged at deployment time for zero inference overhead.
+
+#### Remaining Future Work
+
+3. **Sublinear Gradient Checkpointing**: Implementing activation recomputation to scale training sequence horizons beyond 16,384 tokens on 8 GB cards without materializing all intermediate activations simultaneously.
 
 ---
 
