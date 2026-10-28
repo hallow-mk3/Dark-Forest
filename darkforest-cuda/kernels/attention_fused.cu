@@ -67,6 +67,12 @@ __global__ void kernel_fused_mha_fwd_tiled(
     uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
     const float* q_ptr = Q + (size_t)q_idx * d_model + head_offset;
 
+    // Preload Q values into registers to avoid reloading Q in every step of the key loop
+    float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
+        q_val[lane] = __ldg(&q_ptr[d]);
+    }
+
     // o_acc: MAX_DHEAD/blockDim.x = 128/32 = 4 register slots per lane
     float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
@@ -74,10 +80,10 @@ __global__ void kernel_fused_mha_fwd_tiled(
         const float* k_ptr = K + (size_t)k_idx * d_model + head_offset;
         const float* v_ptr = V + (size_t)k_idx * d_model + head_offset;
 
-        // Compute Q . K across arbitrary d_head
+        // Compute Q . K across arbitrary d_head using cached Q in registers
         float partial_dot = 0.0f;
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            partial_dot += __ldg(&q_ptr[d]) * __ldg(&k_ptr[d]);
+        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
+            partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
         }
         float dot_val = warp_reduce_sum(partial_dot);
         dot_val = __shfl_sync(0xffffffff, dot_val, 0); // Broadcast full dot product to all lanes
@@ -88,12 +94,12 @@ __global__ void kernel_fused_mha_fwd_tiled(
         float alpha  = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
         float p      = __expf(score - m_new);
 
-        l_i = l_i * alpha + p;
+        l_i = fmaf(l_i, alpha, p);
         m_i = m_new;
 
-        // Accumulate V values across d
+        // Accumulate V values across d using hardware FMA
         for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-            o_acc[lane] = o_acc[lane] * alpha + p * __ldg(&v_ptr[d]);
+            o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
         }
     }
 
@@ -125,6 +131,12 @@ __global__ void kernel_fused_attention_fwd_tiled(
     uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
     const float* q_ptr = Q + (size_t)q_idx * d_head;
 
+    // Preload Q values into registers to avoid reloading Q in every step of key loop
+    float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
+        q_val[lane] = __ldg(&q_ptr[d]);
+    }
+
     float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
@@ -132,8 +144,8 @@ __global__ void kernel_fused_attention_fwd_tiled(
         const float* v_ptr = V + (size_t)k_idx * d_head;
 
         float partial_dot = 0.0f;
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            partial_dot += __ldg(&q_ptr[d]) * __ldg(&k_ptr[d]);
+        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
+            partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
         }
         float dot_val = warp_reduce_sum(partial_dot);
         dot_val = __shfl_sync(0xffffffff, dot_val, 0); // Broadcast full dot product to all lanes
@@ -144,11 +156,11 @@ __global__ void kernel_fused_attention_fwd_tiled(
         float alpha  = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
         float p      = __expf(score - m_new);
 
-        l_i = l_i * alpha + p;
+        l_i = fmaf(l_i, alpha, p);
         m_i = m_new;
 
         for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-            o_acc[lane] = o_acc[lane] * alpha + p * __ldg(&v_ptr[d]);
+            o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
         }
     }
 
@@ -456,5 +468,105 @@ extern "C" void launch_fused_mha_backward(
         n_heads, seq_len, d_head, scale, causal
     );
 }
+
+// ---------------------------------------------------------------------------
+// Single-Token Autoregressive KV-Cache Decode Attention
+//
+// In autoregressive decode, the query length is 1 (the single new token).
+// The key and value caches contain the full history of cur_seq_len tokens
+// (cur_seq_len <= max_seq_len).
+//
+// Memory Layout:
+//   Q:       [1, d_model] contiguous (head h is at Q + h * d_head)
+//   K_cache: [max_seq_len, d_model] contiguous (token t, head h is at K_cache + t * d_model + h * d_head)
+//   V_cache: [max_seq_len, d_model] contiguous (token t, head h is at V_cache + t * d_model + h * d_head)
+//   Out:     [1, d_model] contiguous (head h is at Out + h * d_head)
+//
+// Grid: (n_heads, 1) — exactly one block (warp) per attention head.
+// Block: (32, 1) — 32 threads cooperatively process head dimension d_head.
+// ---------------------------------------------------------------------------
+__global__ void kernel_fused_mha_decode_kv(
+    const float* __restrict__ Q,
+    const float* __restrict__ K_cache,
+    const float* __restrict__ V_cache,
+    float* __restrict__ Out,
+    uint32_t n_heads,
+    uint32_t cur_seq_len,
+    uint32_t d_head,
+    float scale
+) {
+    uint32_t h = blockIdx.x;
+    uint32_t tid_d = threadIdx.x; // [0..31]
+    if (h >= n_heads || cur_seq_len == 0) return;
+
+    uint32_t d_model = n_heads * d_head;
+    uint32_t head_offset = h * d_head;
+    const float* q_ptr = Q + head_offset;
+
+    // Preload Q values into registers once for the entire autoregressive decode step
+    float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
+        q_val[lane] = __ldg(&q_ptr[d]);
+    }
+
+    // Online softmax state
+    float m_i = -FLT_MAX;
+    float l_i = 0.0f;
+
+    // Up to 4 register slots per thread for d_head <= 128
+    float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (uint32_t t = 0; t < cur_seq_len; ++t) {
+        const float* k_ptr = K_cache + (size_t)t * d_model + head_offset;
+        const float* v_ptr = V_cache + (size_t)t * d_model + head_offset;
+
+        // Compute Q . K_t across d_head using cached Q
+        float partial_dot = 0.0f;
+        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
+            partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
+        }
+        float dot_val = warp_reduce_sum(partial_dot);
+        dot_val = __shfl_sync(0xffffffff, dot_val, 0); // broadcast to all 32 lanes
+        float score = dot_val * scale;
+
+        // Online softmax update
+        float m_prev = m_i;
+        float m_new  = fmaxf(m_prev, score);
+        float alpha  = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
+        float p      = __expf(score - m_new);
+
+        l_i = fmaf(l_i, alpha, p);
+        m_i = m_new;
+
+        // Accumulate V_t with hardware FMA
+        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
+            o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
+        }
+    }
+
+    float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
+    float* out_ptr = Out + head_offset;
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
+        out_ptr[d] = o_acc[lane] * inv_l;
+    }
+}
+
+extern "C" void launch_fused_mha_decode_kv(
+    const float* q,
+    const float* k_cache,
+    const float* v_cache,
+    float* out,
+    uint32_t n_heads,
+    uint32_t cur_seq_len,
+    uint32_t d_head,
+    float scale
+) {
+    dim3 block_dim(32, 1);
+    dim3 grid_dim(n_heads, 1);
+    kernel_fused_mha_decode_kv<<<grid_dim, block_dim>>>(
+        q, k_cache, v_cache, out, n_heads, cur_seq_len, d_head, scale
+    );
+}
+
 
 
