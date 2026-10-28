@@ -329,9 +329,16 @@ impl Tensor {
         self.storage.write().expect("Tensor storage poisoned")
     }
 
-    /// Read the i-th element (flat index).
+    /// Read the i-th element (flat index) without cloning full tensor.
     pub fn get(&self, i: usize) -> f32 {
-        self.to_vec()[i]
+        let guard = self.data();
+        match &guard.storage {
+            Storage::Cpu(v) => v[i],
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(d) => {
+                d.download_slice(i, 1).map(|v| v[0]).unwrap_or_else(|_| self.to_vec()[i])
+            }
+        }
     }
 
     /// Write the i-th element (flat index).
