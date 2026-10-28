@@ -1081,3 +1081,101 @@ pub fn cuda_gradient_checkpoint_scale(
     #[cfg(not(darkforest_cuda_kernels))]
     Err(anyhow::Error::msg("CUDA kernels not compiled"))
 }
+
+/// Single-token autoregressive KV-cache multi-head attention decode forward pass.
+pub fn cuda_fused_mha_decode_kv(
+    q: *const f32,
+    k_cache: *const f32,
+    v_cache: *const f32,
+    out: *mut f32,
+    n_heads: usize,
+    cur_seq_len: usize,
+    d_head: usize,
+    scale: f32,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_fused_mha_decode_kv(
+                q: *const f32,
+                k_cache: *const f32,
+                v_cache: *const f32,
+                out: *mut f32,
+                n_heads: u32,
+                cur_seq_len: u32,
+                d_head: u32,
+                scale: f32,
+            );
+        }
+        launch_fused_mha_decode_kv(
+            q,
+            k_cache,
+            v_cache,
+            out,
+            n_heads as u32,
+            cur_seq_len as u32,
+            d_head as u32,
+            scale,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// High-throughput matrix-vector multiplication (GEMV) forward: out = weight * x + bias.
+pub fn cuda_gemv_forward(
+    x: *const f32,
+    weight: *const f32,
+    bias: *const f32,
+    out: *mut f32,
+    in_features: usize,
+    out_features: usize,
+    has_bias: bool,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_gemv_forward(
+                x: *const f32,
+                weight: *const f32,
+                bias: *const f32,
+                out: *mut f32,
+                in_features: u32,
+                out_features: u32,
+                has_bias: u32,
+            );
+        }
+        launch_gemv_forward(
+            x,
+            weight,
+            bias,
+            out,
+            in_features as u32,
+            out_features as u32,
+            has_bias as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// 1D argmax reduction on device. Writes result token index into `out_idx` on device.
+pub fn cuda_argmax_1d(
+    x: *const f32,
+    out_idx: *mut u32,
+    n: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_argmax_1d(x: *const f32, out_idx: *mut u32, n: u32);
+        }
+        launch_argmax_1d(x, out_idx, n as u32);
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
