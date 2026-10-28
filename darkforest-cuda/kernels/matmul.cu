@@ -361,3 +361,65 @@ extern "C" void launch_adamw_update(
         bias_correction1, bias_correction2
     );
 }
+
+// ---------------------------------------------------------------------------
+// High-Throughput GEMV Forward: out = weight * x + bias
+//
+// Optimized for single-token (batch = 1) decode passes.
+// Vectorized float4 memory transactions across in_features.
+// 256 threads per block, full 1D grid coverage over out_features.
+// ---------------------------------------------------------------------------
+__global__ void kernel_gemv_forward(
+    const float* __restrict__ x,
+    const float* __restrict__ weight,
+    const float* __restrict__ bias,
+    float* __restrict__ out,
+    uint32_t in_features,
+    uint32_t out_features,
+    uint32_t has_bias
+) {
+    uint32_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= out_features) return;
+
+    const float* w_row = weight + (size_t)out_idx * in_features;
+    float sum = 0.0f;
+    uint32_t vec_end = (in_features / 4) * 4;
+
+    bool aligned = (((uintptr_t)(x) & 15) == 0) && (((uintptr_t)(w_row) & 15) == 0);
+    if (aligned) {
+        for (uint32_t k = 0; k < vec_end; k += 4) {
+            float4 xv = __ldg(reinterpret_cast<const float4*>(x + k));
+            float4 wv = __ldg(reinterpret_cast<const float4*>(w_row + k));
+            sum = fmaf(xv.x, wv.x, sum);
+            sum = fmaf(xv.y, wv.y, sum);
+            sum = fmaf(xv.z, wv.z, sum);
+            sum = fmaf(xv.w, wv.w, sum);
+        }
+    } else {
+        for (uint32_t k = 0; k < vec_end; ++k) {
+            sum = fmaf(__ldg(&x[k]), __ldg(&w_row[k]), sum);
+        }
+    }
+    for (uint32_t k = vec_end; k < in_features; ++k) {
+        sum = fmaf(__ldg(&x[k]), __ldg(&w_row[k]), sum);
+    }
+    if (has_bias && bias) sum += __ldg(&bias[out_idx]);
+    out[out_idx] = sum;
+}
+
+extern "C" void launch_gemv_forward(
+    const float* x,
+    const float* weight,
+    const float* bias,
+    float* out,
+    uint32_t in_features,
+    uint32_t out_features,
+    uint32_t has_bias
+) {
+    uint32_t threads = 256;
+    uint32_t blocks = (out_features + threads - 1) / threads;
+    if (blocks == 0) blocks = 1;
+    kernel_gemv_forward<<<blocks, threads>>>(
+        x, weight, bias, out, in_features, out_features, has_bias
+    );
+}
