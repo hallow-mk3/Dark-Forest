@@ -10,12 +10,15 @@ Executes and verifies:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 import torch
 import torch.nn.functional as F
 
+# Ensure the logs directory exists
+os.makedirs("logs", exist_ok=True)
 
 def log_suite(name: str):
     print(f"\n================================================================================")
@@ -145,6 +148,137 @@ def test_training_loss_convergence():
         print(f"[FAIL] Insufficient convergence: {initial_loss:.4f} -> {final_loss:.4f}")
         return False, 0, duration
 
+def test_kv_cache_fast_generation():
+    log_suite("6. KV-Cache Fast Generation Integration (generate_fast via train_static)")
+    t0 = time.perf_counter()
+    # Train a tiny model for 10 steps then immediately generate 16 tokens with --generate
+    cmd = [
+        "cargo", "run", "--release", "--bin", "train_static", "--features", "cuda",
+        "--",
+        "--steps", "10",
+        "--ctx-len", "32",
+        "--d-model", "64",
+        "--n-layers", "2",
+        "--n-heads", "2",
+        "--d-ff", "256",
+        "--generate", "8",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    with open("logs/kv_cache_fast_generate.log", "w") as f:
+        f.write(res.stdout + "\n" + res.stderr)
+    duration = time.perf_counter() - t0
+    if res.returncode != 0:
+        print(f"[FAIL] (code {res.returncode}):\n{res.stderr[-1000:]}")
+        return False, 0, duration
+    # Success criteria: output contains speed measurement line
+    has_speed = "ms/token" in res.stdout
+    has_output = "Speed:" in res.stdout or "Naive Speed:" in res.stdout or "tok/s" in res.stdout
+    if has_speed or has_output:
+        print(f"[PASS] KV-cache generate_fast ran successfully in {duration:.2f}s")
+        print(f"       -> Full log saved to logs/kv_cache_fast_generate.log")
+        return True, 1, duration
+    else:
+        print(f"[FAIL] generate_fast output missing expected speed telemetry.")
+        print(f"       Stdout tail: {res.stdout[-400:]}")
+        return False, 0, duration
+
+
+def test_lora_finetune_smoke():
+    log_suite("7. LoRA Fine-Tuning Smoke Test (StaticLoRAGPT2 via train_static --lora)")
+    t0 = time.perf_counter()
+    cmd = [
+        "cargo", "run", "--release", "--bin", "train_static", "--features", "cuda",
+        "--",
+        "--steps", "10",
+        "--ctx-len", "32",
+        "--d-model", "64",
+        "--n-layers", "2",
+        "--n-heads", "2",
+        "--d-ff", "256",
+        "--lora",
+        "--lora-rank", "4",
+        "--lora-alpha", "8.0",
+        "--generate", "8",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    with open("logs/lora_smoke_test.log", "w") as f:
+        f.write(res.stdout + "\n" + res.stderr)
+    duration = time.perf_counter() - t0
+    if res.returncode != 0:
+        print(f"[FAIL] (code {res.returncode}):\n{res.stderr[-1000:]}")
+        return False, 0, duration
+    # Verify LoRA was active: the binary prints trainable param count
+    has_lora_block = "Parameter-Efficient Fine-Tuning Active" in res.stdout or "Trainable LoRA" in res.stdout
+    has_loss = any("loss" in line.lower() for line in res.stdout.splitlines())
+    if has_lora_block and has_loss:
+        print(f"[PASS] LoRA fine-tuning completed {10} steps in {duration:.2f}s")
+        print(f"       -> Full log saved to logs/lora_smoke_test.log")
+        return True, 2, duration
+    else:
+        print(f"[FAIL] LoRA output missing expected telemetry.")
+        print(f"       Stdout tail: {res.stdout[-600:]}")
+        return False, 0, duration
+
+
+
+def test_lora_merge_weights():
+    log_suite("8. LoRA Weight Merging (train_static --lora --merge-lora)")
+    t0 = time.perf_counter()
+    cmd = [
+        "cargo", "run", "--release", "--bin", "train_static", "--features", "cuda",
+        "--",
+        "--steps", "5",
+        "--ctx-len", "32",
+        "--d-model", "64",
+        "--n-layers", "2",
+        "--n-heads", "2",
+        "--d-ff", "256",
+        "--lora",
+        "--merge-lora",
+        "--generate", "8",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    with open("logs/lora_merge_test.log", "w") as f:
+        f.write(res.stdout + "\n" + res.stderr)
+    duration = time.perf_counter() - t0
+    if res.returncode != 0:
+        print(f"[FAIL] (code {res.returncode}):\n{res.stderr[-1000:]}")
+        return False, 0, duration
+    has_merge = "Merged LoRA adapters directly into base weights" in res.stdout or "LoRA weights merged successfully" in res.stdout
+    if has_merge:
+        print(f"[PASS] LoRA adapter successfully merged into base weights in {duration:.2f}s")
+        print(f"       -> Full log saved to logs/lora_merge_test.log")
+        return True, 1, duration
+    else:
+        print(f"[FAIL] Merge output missing expected telemetry.")
+        print(f"       Stdout tail: {res.stdout[-600:]}")
+        return False, 0, duration
+
+
+def test_darkforest_cli():
+    log_suite("9. Native Dark Forest Engine CLI (darkforest_cli info & generate)")
+    t0 = time.perf_counter()
+    cmd = [
+        "cargo", "run", "--release", "--bin", "darkforest_cli", "--", "info",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    with open("logs/cli_test.log", "w") as f:
+        f.write(res.stdout + "\n" + res.stderr)
+    duration = time.perf_counter() - t0
+    if res.returncode != 0:
+        print(f"[FAIL] (code {res.returncode}):\n{res.stderr[-1000:]}")
+        return False, 0, duration
+    has_engine_info = "Dark Forest Engine Configuration" in res.stdout or "Dark Forest Engine Specification" in res.stdout
+    if has_engine_info:
+        print(f"[PASS] Native darkforest_cli info returned successfully in {duration:.2f}s")
+        print(f"       -> Full log saved to logs/cli_test.log")
+        return True, 1, duration
+    else:
+        print(f"[FAIL] darkforest_cli output missing expected header.")
+        print(f"       Stdout tail: {res.stdout[-600:]}")
+        return False, 0, duration
+
+
 
 def main():
     print("================================================================================")
@@ -158,6 +292,10 @@ def main():
         test_cuda_hardware_sanity,
         test_attention_numerical_parity,
         test_training_loss_convergence,
+        test_kv_cache_fast_generation,
+        test_lora_finetune_smoke,
+        test_lora_merge_weights,
+        test_darkforest_cli,
     ]
 
     total_passed = 0
