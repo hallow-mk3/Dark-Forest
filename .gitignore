@@ -25,6 +25,7 @@ benchmark/*.json
 
 # Transient execution logs & traces
 *.log
+logs/
 
 # OS
 .DS_Store
