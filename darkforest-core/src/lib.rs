@@ -15,7 +15,11 @@ pub mod tensor;
 
 pub use autograd::{checkpoint, no_grad};
 pub use data::{DataLoader, Dataset, TensorDataset};
-pub use engine::StaticGPT2;
+pub use engine::{
+    load_gpt2_safetensors, save_gpt2_safetensors, BPETokenizer, ByteTokenizer, CharTokenizer, Engine,
+    EngineConfig, GenerationReport, SafeTensorsFile, SamplerConfig, StaticGPT2, StaticLoRAConfig,
+    StaticLoRAGPT2, Tokenizer,
+};
 pub use optimizer::{AdamW, OffloadedAdamW};
 pub use scheduler::{CosineAnnealingLR, ExponentialLR, LRScheduler, StepLR};
 pub use tensor::{DType, Device, Shape, Tensor};
