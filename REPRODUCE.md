@@ -54,3 +54,49 @@ cargo run --release --bin train_static --features cuda -- --steps 250 --ctx-len 
 - [`training_loss_static.csv`](training_loss_static.csv): Contiguous step, loss, rolling execution time, and step latency log.
 - [`benchmark/bench_exact_same_config.py`](benchmark/bench_exact_same_config.py): Standard PyTorch baseline harness.
 - [`darkforest-core/src/bin/train_static.rs`](darkforest-core/src/bin/train_static.rs): Static zero-allocation training engine source.
+
+---
+
+## 4. KV-Cache Fast Inference Benchmark
+
+Benchmarks `generate_fast` (O(S) KV-cache decode, custom GEMV kernel, GPU argmax) vs. naive O(S²) full-context recomputation side-by-side. After training 50 steps, generates 64 tokens via both paths and prints a speedup table:
+```powershell
+cargo run --release --bin train_static --features cuda -- --steps 50 --ctx-len 128 --d-model 768 --n-layers 12 --n-heads 12 --d-ff 3072 --generate-compare 64
+```
+
+Or run the full sweep benchmark (multiple token budgets):
+```powershell
+python benchmark/bench_inference.py --config small
+python benchmark/bench_inference.py --config gpt2
+```
+
+---
+
+## 5. LoRA / QLoRA Parameter-Efficient Fine-Tuning
+
+Freezes all base weights and trains only low-rank adapter matrices A and B (< 1% of parameters):
+```powershell
+# Standard LoRA (rank 8, alpha 16)
+cargo run --release --bin train_static --features cuda -- --steps 100 --ctx-len 128 --d-model 768 --n-layers 12 --n-heads 12 --d-ff 3072 --lora --lora-rank 8 --lora-alpha 16
+
+# QLoRA: 4-bit NF4 base weight compression + LoRA adapters
+cargo run --release --bin train_static --features cuda -- --steps 100 --ctx-len 128 --d-model 768 --n-layers 12 --n-heads 12 --d-ff 3072 --qlora --lora-rank 8
+
+# Zero-overhead inference via weight merging (W_base += (alpha/rank) * B @ A)
+cargo run --release --bin train_static --features cuda -- --steps 50 --lora --merge-lora --generate 32
+
+---
+
+## 6. Standalone Engine CLI (`darkforest_cli`)
+
+Dark Forest provides a dedicated native CLI binary for inference, streaming chat, and architecture inspection:
+```powershell
+# Display engine configuration and resource footprint
+cargo run --release --bin darkforest_cli -- info --config gpt2
+
+# Fast KV-cache generation with context-aware sampling & repetition penalty
+cargo run --release --bin darkforest_cli -- generate --config small --tokens 64 --temp 0.8 --top-p 0.9 --rep-penalty 1.15 --stream
+
+# Interactive token-streaming chat session
+cargo run --release --bin darkforest_cli -- chat --config micro --temp 0.7
+```
