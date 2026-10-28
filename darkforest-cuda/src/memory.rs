@@ -191,6 +191,30 @@ impl CudaBuffer {
             .memcpy_d2d(self.ptr, src.ptr as *const u8, self.bytes)
     }
 
+    /// Asynchronously copy `bytes_to_copy` from `self` to `dst` at byte offset `dst_byte_offset`.
+    pub fn copy_bytes_to(&self, dst: &mut CudaBuffer, dst_byte_offset: usize, bytes_to_copy: usize) -> Result<()> {
+        if bytes_to_copy > self.bytes || dst_byte_offset + bytes_to_copy > dst.bytes {
+            return Err(anyhow!("copy_bytes_to out of bounds"));
+        }
+        #[cfg(darkforest_cuda_kernels)]
+        unsafe {
+            let code = cuda_runtime::cudaMemcpyAsync(
+                dst.ptr.add(dst_byte_offset) as *mut _,
+                self.ptr as *const _,
+                bytes_to_copy,
+                cuda_runtime::DEVICE_TO_DEVICE,
+                std::ptr::null_mut(),
+            );
+            if code != 0 {
+                return Err(anyhow!("cudaMemcpyAsync D2D failed: {code}"));
+            }
+            return Ok(());
+        }
+        #[cfg(not(darkforest_cuda_kernels))]
+        Err(anyhow!("CUDA not available"))
+    }
+
+
     pub fn upload(&self, host_data: &[f32]) -> Result<()> {
         let bytes = host_data.len() * std::mem::size_of::<f32>();
         self.allocator
@@ -231,6 +255,54 @@ impl CudaBuffer {
         #[cfg(not(darkforest_cuda_kernels))]
         Err(anyhow!("CUDA not available"))
     }
+
+    /// Synchronously download a slice of f32 elements [element_offset .. element_offset + count].
+    pub fn download_slice(&self, element_offset: usize, count: usize) -> Result<Vec<f32>> {
+        let byte_offset = element_offset * std::mem::size_of::<f32>();
+        let bytes_to_copy = count * std::mem::size_of::<f32>();
+        if byte_offset + bytes_to_copy > self.bytes {
+            return Err(anyhow!(
+                "download_slice out of bounds: offset {} + count {} exceeds buffer bytes {}",
+                element_offset, count, self.bytes
+            ));
+        }
+        let mut out = vec![0.0f32; count];
+        self.allocator.memcpy_d2h(
+            out.as_mut_ptr() as *mut u8,
+            unsafe { self.ptr.add(byte_offset) } as *const u8,
+            bytes_to_copy,
+        )?;
+        Ok(out)
+    }
+
+    /// Asynchronously download arbitrary bytes from `self.ptr + byte_offset` to pinned buffer `dst`.
+    pub fn async_download_to_pinned(
+        &self,
+        dst: &PinnedBuffer,
+        byte_offset: usize,
+        bytes_to_copy: usize,
+    ) -> Result<()> {
+        if byte_offset + bytes_to_copy > self.bytes || bytes_to_copy > dst.bytes {
+            return Err(anyhow!("async_download_to_pinned out of bounds"));
+        }
+        #[cfg(darkforest_cuda_kernels)]
+        unsafe {
+            let code = cuda_runtime::cudaMemcpyAsync(
+                dst.ptr as *mut _,
+                self.ptr.add(byte_offset) as *const _,
+                bytes_to_copy,
+                cuda_runtime::DEVICE_TO_HOST,
+                std::ptr::null_mut(),
+            );
+            if code != 0 {
+                return Err(anyhow!("cudaMemcpyAsync to pinned failed: {code}"));
+            }
+            return Ok(());
+        }
+        #[cfg(not(darkforest_cuda_kernels))]
+        Err(anyhow!("CUDA not available"))
+    }
+
 
     pub fn as_ptr(&self) -> *const u8 {
         self.ptr as *const u8
@@ -303,7 +375,19 @@ impl PinnedBuffer {
     pub fn read_f32(&self) -> f32 {
         unsafe { *(self.ptr as *const f32) }
     }
+
+    /// Read the single u32 at offset 0 (intended for argmax token index).
+    pub fn read_u32(&self) -> u32 {
+        unsafe { *(self.ptr as *const u32) }
+    }
+
+    /// View pinned memory as a slice of f32 elements.
+    pub fn as_f32_slice(&self, count: usize) -> &[f32] {
+        assert!(count * std::mem::size_of::<f32>() <= self.bytes, "as_f32_slice out of bounds");
+        unsafe { std::slice::from_raw_parts(self.ptr as *const f32, count) }
+    }
 }
+
 
 impl Drop for PinnedBuffer {
     fn drop(&mut self) {
