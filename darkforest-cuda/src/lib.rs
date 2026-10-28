@@ -530,6 +530,90 @@ impl DeviceTensor {
         unsafe { (self.buffer.ptr as *mut f32).add(offset) }
     }
 
+    /// Synchronously download a slice of f32 elements [offset .. offset + count].
+    pub fn download_slice(&self, offset: usize, count: usize) -> Result<Vec<f32>> {
+        self.buffer.download_slice(offset, count)
+    }
+
+    /// Copy this 1D tensor (or [1, cols] tensor) into `dst` (shape [rows, cols]) at row `row_idx`.
+    pub fn copy_row_into(&self, dst: &mut DeviceTensor, row_idx: usize) -> Result<()> {
+        let cols = self.numel();
+        if dst.shape.len() != 2 || dst.shape[1] != cols || row_idx >= dst.shape[0] {
+            return Err(anyhow!(
+                "copy_row_into dimension mismatch: src numel={}, dst={:?}, row_idx={}",
+                cols, dst.shape, row_idx
+            ));
+        }
+        let bytes = cols * std::mem::size_of::<f32>();
+        self.buffer.copy_bytes_to(&mut dst.buffer, row_idx * bytes, bytes)
+    }
+
+    /// Asynchronously download a slice of f32 elements to page-locked pinned memory.
+    pub fn async_download_slice_to_pinned(
+        &self,
+        dst: &memory::PinnedBuffer,
+        offset: usize,
+        count: usize,
+    ) -> Result<()> {
+        let byte_offset = offset * std::mem::size_of::<f32>();
+        let bytes_to_copy = count * std::mem::size_of::<f32>();
+        self.buffer.async_download_to_pinned(dst, byte_offset, bytes_to_copy)
+    }
+
+    /// High-throughput matrix-vector multiplication (GEMV) forward: out = weight * self + bias.
+    ///
+    /// Ideal for single-token autoregressive decoding (batch = 1).
+    pub fn gemv_into(
+        &self,
+        weight: &DeviceTensor,
+        bias: Option<&DeviceTensor>,
+        out: &mut DeviceTensor,
+    ) -> Result<()> {
+        let in_features = weight.shape[1];
+        let out_features = weight.shape[0];
+        if self.numel() != in_features || out.numel() != out_features {
+            return Err(anyhow!(
+                "gemv_into shape mismatch: x={}, weight=[{}, {}], out={}",
+                self.numel(), out_features, in_features, out.numel()
+            ));
+        }
+        let (has_bias, b_ptr) = match bias {
+            Some(b) => {
+                if b.numel() != out_features {
+                    return Err(anyhow!("gemv_into bias shape mismatch"));
+                }
+                (true, b.as_ptr())
+            }
+            None => (false, std::ptr::null()),
+        };
+        kernels::cuda_gemv_forward(
+            self.as_ptr(),
+            weight.as_ptr(),
+            b_ptr,
+            out.as_mut_ptr(),
+            in_features,
+            out_features,
+            has_bias,
+        )
+    }
+
+    /// Compute argmax across this 1D tensor and write the resulting uint32 index into `out_idx_buf` on device.
+    pub fn argmax_device(&self, out_idx_buf: &memory::CudaBuffer) -> Result<()> {
+        kernels::cuda_argmax_1d(self.as_ptr(), out_idx_buf.ptr as *mut u32, self.numel())
+    }
+
+    /// Compute argmax across this 1D tensor on GPU and return the index.
+    pub fn argmax(&self) -> Result<usize> {
+        let allocator = std::sync::Arc::new(memory::GpuAllocator);
+        let out_buf = memory::CudaBuffer::new(std::mem::size_of::<u32>(), allocator)?;
+        self.argmax_device(&out_buf)?;
+        let pinned = memory::PinnedBuffer::new(std::mem::size_of::<u32>())?;
+        out_buf.async_download_to_pinned(&pinned, 0, std::mem::size_of::<u32>())?;
+        crate::cuda_sync()?;
+        Ok(pinned.read_u32() as usize)
+    }
+
+
     pub fn add(&self, other: &DeviceTensor) -> Result<DeviceTensor> {
         if self.shape != other.shape {
             return Err(anyhow!("DeviceTensor::add shape mismatch"));
@@ -1698,6 +1782,44 @@ impl AttentionContext {
             )?;
         }
         Ok(())
+    }
+
+    /// Single-token autoregressive decoding attention using cached keys and values.
+    ///
+    /// Q: [1, d_model]
+    /// K_cache: [seq_len, d_model]
+    /// V_cache: [seq_len, d_model]
+    /// Out: [1, d_model]
+    /// cur_seq_len: number of active tokens in cache (1..=seq_len)
+    pub fn decode_kv_into(
+        &self,
+        q: &DeviceTensor,
+        k_cache: &DeviceTensor,
+        v_cache: &DeviceTensor,
+        cur_seq_len: usize,
+        scale: f32,
+        out: &mut DeviceTensor,
+    ) -> Result<()> {
+        if q.numel() != self.d_model || out.numel() != self.d_model {
+            return Err(anyhow!("decode_kv_into Q or Out dimension mismatch"));
+        }
+        if cur_seq_len == 0 || cur_seq_len > self.seq_len {
+            return Err(anyhow!(
+                "decode_kv_into cur_seq_len {} out of bounds (1..={})",
+                cur_seq_len,
+                self.seq_len
+            ));
+        }
+        kernels::cuda_fused_mha_decode_kv(
+            q.as_ptr(),
+            k_cache.as_ptr(),
+            v_cache.as_ptr(),
+            out.as_mut_ptr(),
+            self.n_heads,
+            cur_seq_len,
+            self.d_head,
+            scale,
+        )
     }
 
     pub fn backward_device(
