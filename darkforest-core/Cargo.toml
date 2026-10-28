@@ -25,6 +25,18 @@ path = "src/bin/train_static.rs"
 name = "bench_sgemm"
 path = "src/bin/bench_sgemm.rs"
 
+[[bin]]
+name = "bench_isolate"
+path = "src/bin/bench_isolate.rs"
+
+[[bin]]
+name = "granular_bench"
+path = "src/bin/granular_bench.rs"
+
+[[bin]]
+name = "darkforest_cli"
+path = "src/bin/darkforest_cli.rs"
+
 [dependencies]
 thiserror  = { workspace = true }
 anyhow     = { workspace = true }
