@@ -435,3 +435,73 @@ extern "C" void launch_gradient_checkpoint_scale(
     kernel_gradient_checkpoint_scale<<<blocks, threads>>>(x, out, scale, n);
 }
 
+// ---------------------------------------------------------------------------
+// 1D Argmax Reduction Kernel
+//
+// Computes argmax_{i in [0, n)} x[i] on device using a single-block cooperative
+// reduction with warp shuffle instructions and shared memory.
+// Writes the resulting index to out_idx (single uint32_t on device).
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void warp_reduce_argmax(float& val, uint32_t& idx) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        float other_val = __shfl_down_sync(0xFFFFFFFF, val, offset);
+        uint32_t other_idx = __shfl_down_sync(0xFFFFFFFF, idx, offset);
+        if (other_val > val) {
+            val = other_val;
+            idx = other_idx;
+        }
+    }
+}
+
+__global__ void kernel_argmax_1d(
+    const float* __restrict__ x,
+    uint32_t* __restrict__ out_idx,
+    uint32_t n
+) {
+    __shared__ float s_val[32];
+    __shared__ uint32_t s_idx[32];
+
+    uint32_t tid = threadIdx.x;
+    float best_val = -1e30f;
+    uint32_t best_idx = 0;
+
+    for (uint32_t i = tid; i < n; i += blockDim.x) {
+        float v = x[i];
+        if (v > best_val) {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+
+    warp_reduce_argmax(best_val, best_idx);
+
+    uint32_t lane = tid % 32;
+    uint32_t warp = tid / 32;
+    if (lane == 0) {
+        s_val[warp] = best_val;
+        s_idx[warp] = best_idx;
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+        uint32_t num_warps = (blockDim.x + 31) / 32;
+        float final_val = (lane < num_warps) ? s_val[lane] : -1e30f;
+        uint32_t final_idx = (lane < num_warps) ? s_idx[lane] : 0;
+        warp_reduce_argmax(final_val, final_idx);
+        if (lane == 0) {
+            *out_idx = final_idx;
+        }
+    }
+}
+
+extern "C" void launch_argmax_1d(
+    const float* x,
+    uint32_t* out_idx,
+    uint32_t n
+) {
+    uint32_t threads = 512;
+    kernel_argmax_1d<<<1, threads>>>(x, out_idx, n);
+}
+
+
