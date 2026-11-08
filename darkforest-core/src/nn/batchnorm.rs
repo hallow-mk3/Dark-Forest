@@ -34,7 +34,7 @@ impl BatchNorm2d {
 
     pub fn forward(&mut self, x: &Value) -> Result<Value> {
         let xt = x.tensor();
-        let (out, _, _) = batch_norm(
+        let (out, means, rstds) = batch_norm(
             &xt,
             &self.weight.tensor(),
             &self.bias.tensor(),
@@ -42,7 +42,16 @@ impl BatchNorm2d {
             self.eps,
             self.training,
         )?;
-        Ok(Value::leaf(out))
+        if !crate::autograd::is_grad_enabled() {
+            return Ok(Value::leaf(out));
+        }
+        let grad_fn = Box::new(crate::autograd::grad_fn::BatchNormGradFn {
+            x: xt,
+            gamma: self.weight.tensor(),
+            means,
+            rstds,
+        });
+        Ok(Value::from_op(out, grad_fn, vec![x.clone(), self.weight.clone(), self.bias.clone()]))
     }
 
     pub fn parameters(&self) -> Vec<Value> {
@@ -79,7 +88,7 @@ impl BatchNorm1d {
 
     pub fn forward(&mut self, x: &Value) -> Result<Value> {
         let xt = x.tensor();
-        let (out, _, _) = batch_norm(
+        let (out, means, rstds) = batch_norm(
             &xt,
             &self.weight.tensor(),
             &self.bias.tensor(),
@@ -87,7 +96,16 @@ impl BatchNorm1d {
             self.eps,
             self.training,
         )?;
-        Ok(Value::leaf(out))
+        if !crate::autograd::is_grad_enabled() {
+            return Ok(Value::leaf(out));
+        }
+        let grad_fn = Box::new(crate::autograd::grad_fn::BatchNormGradFn {
+            x: xt,
+            gamma: self.weight.tensor(),
+            means,
+            rstds,
+        });
+        Ok(Value::from_op(out, grad_fn, vec![x.clone(), self.weight.clone(), self.bias.clone()]))
     }
 
     pub fn parameters(&self) -> Vec<Value> {

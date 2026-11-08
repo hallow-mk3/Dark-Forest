@@ -424,7 +424,7 @@ impl StaticGPT2 {
         )?;
         let d_target_indices = darkforest_cuda::memory::CudaBuffer::new(
             seq_len * std::mem::size_of::<u32>(),
-            allocator,
+            allocator.clone(),
         )?;
 
         // Preload pos indices [0, 1, ..., seq_len-1] once
@@ -1145,6 +1145,7 @@ impl StaticGPT2 {
         )?;
 
         // Transformer blocks backward (reverse order)
+        let scale = (self.d_model as f32 / self.n_heads as f32).powf(-0.5);
         for l in (0..self.n_layers).rev() {
             let lw = &self.layers[l];
             let la = &self.layer_acts[l];

@@ -11,6 +11,8 @@
 
 pub mod kernels;
 pub mod memory;
+pub use kernels::cuda_sync;
+pub use memory::{get_memory_info, set_device};
 
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
@@ -1697,7 +1699,7 @@ pub struct AttentionContext {
     d_q: memory::CudaBuffer,
     d_k: memory::CudaBuffer,
     d_v: memory::CudaBuffer,
-    probabilities: memory::CudaBuffer,
+    probabilities: std::sync::Mutex<Option<memory::CudaBuffer>>,
 }
 
 impl AttentionContext {
@@ -1713,7 +1715,6 @@ impl AttentionContext {
             .ok_or_else(|| anyhow!("attention shape is too large"))?;
         let allocator = Arc::new(memory::GpuAllocator);
         let bytes = elements * std::mem::size_of::<f32>();
-        let workspace_bytes = n_heads * seq_len * seq_len * std::mem::size_of::<f32>();
         Ok(Self {
             n_heads,
             seq_len,
@@ -1727,8 +1728,18 @@ impl AttentionContext {
             d_q: memory::CudaBuffer::new(bytes, allocator.clone())?,
             d_k: memory::CudaBuffer::new(bytes, allocator.clone())?,
             d_v: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            probabilities: memory::CudaBuffer::new(workspace_bytes, allocator)?,
+            probabilities: std::sync::Mutex::new(None),
         })
+    }
+
+    fn ensure_probabilities(&self) -> Result<std::sync::MutexGuard<'_, Option<memory::CudaBuffer>>> {
+        let mut guard = self.probabilities.lock().map_err(|e| anyhow!("{e}"))?;
+        if guard.is_none() {
+            let allocator = Arc::new(memory::GpuAllocator);
+            let workspace_bytes = self.n_heads * self.seq_len * self.seq_len * std::mem::size_of::<f32>();
+            *guard = Some(memory::CudaBuffer::new(workspace_bytes, allocator)?);
+        }
+        Ok(guard)
     }
 
     pub fn forward_device(
@@ -1856,6 +1867,8 @@ impl AttentionContext {
         {
             return Err(anyhow!("attention backward output shape mismatch"));
         }
+        let prob_guard = self.ensure_probabilities()?;
+        let prob_ptr = prob_guard.as_ref().unwrap().ptr as *mut f32;
         if self.n_heads == 1 {
             kernels::cuda_attention_backward(
                 q.as_ptr(),
@@ -1865,7 +1878,7 @@ impl AttentionContext {
                 d_q.as_mut_ptr(),
                 d_k.as_mut_ptr(),
                 d_v.as_mut_ptr(),
-                self.probabilities.ptr as *mut f32,
+                prob_ptr,
                 self.seq_len,
                 self.d_head,
                 scale,
@@ -1880,7 +1893,7 @@ impl AttentionContext {
                 d_q.as_mut_ptr(),
                 d_k.as_mut_ptr(),
                 d_v.as_mut_ptr(),
-                self.probabilities.ptr as *mut f32,
+                prob_ptr,
                 self.n_heads,
                 self.seq_len,
                 self.d_head,
@@ -1924,6 +1937,8 @@ impl AttentionContext {
         causal: bool,
     ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>)> {
         self.d_out.upload(d_out)?;
+        let prob_guard = self.ensure_probabilities()?;
+        let prob_ptr = prob_guard.as_ref().unwrap().ptr as *mut f32;
         kernels::cuda_attention_backward(
             self.q.ptr as *const f32,
             self.k.ptr as *const f32,
@@ -1932,7 +1947,7 @@ impl AttentionContext {
             self.d_q.ptr as *mut f32,
             self.d_k.ptr as *mut f32,
             self.d_v.ptr as *mut f32,
-            self.probabilities.ptr as *mut f32,
+            prob_ptr,
             self.seq_len,
             self.d_head,
             scale,

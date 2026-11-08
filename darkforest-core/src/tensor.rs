@@ -92,28 +92,34 @@ impl TensorData {
                 storage: Storage::Cpu(vec![0.0f32; numel(shape)]),
             },
             #[cfg(feature = "cuda")]
-            Device::Cuda(_) => TensorData {
-                storage: Storage::Cuda(
-                    darkforest_cuda::DeviceTensor::zeros(shape.to_vec())
-                        .expect("CUDA zeros failed"),
-                ),
+            Device::Cuda(id) => {
+                let _ = darkforest_cuda::set_device(*id);
+                TensorData {
+                    storage: Storage::Cuda(
+                        darkforest_cuda::DeviceTensor::zeros(shape.to_vec())
+                            .expect("CUDA zeros failed"),
+                    ),
+                }
             },
             #[cfg(not(feature = "cuda"))]
             Device::Cuda(_) => panic!("CUDA support is not enabled"),
         }
     }
 
-    pub fn from_vec(data: Vec<f32>, shape: &[usize], device: &Device) -> Self {
+    pub fn from_vec(data: Vec<f32>, _shape: &[usize], device: &Device) -> Self {
         match device {
             Device::Cpu => TensorData {
                 storage: Storage::Cpu(data),
             },
             #[cfg(feature = "cuda")]
-            Device::Cuda(_) => TensorData {
-                storage: Storage::Cuda(
-                    darkforest_cuda::DeviceTensor::from_host(&data, shape.to_vec())
-                        .expect("CUDA upload failed"),
-                ),
+            Device::Cuda(id) => {
+                let _ = darkforest_cuda::set_device(*id);
+                TensorData {
+                    storage: Storage::Cuda(
+                        darkforest_cuda::DeviceTensor::from_host(&data, _shape.to_vec())
+                            .expect("CUDA upload failed"),
+                    ),
+                }
             },
             #[cfg(not(feature = "cuda"))]
             Device::Cuda(_) => panic!("CUDA support is not enabled"),
@@ -203,7 +209,8 @@ impl Tensor {
     pub fn ones_device(shape: impl Into<Shape>, device: Device) -> Self {
         let shape = shape.into();
         #[cfg(feature = "cuda")]
-        if let Device::Cuda(_) = device {
+        if let Device::Cuda(id) = device {
+            let _ = darkforest_cuda::set_device(id);
             let strides = contiguous_strides(&shape);
             return Tensor {
                 storage: Arc::new(RwLock::new(TensorData {
@@ -311,6 +318,10 @@ impl Tensor {
 
     pub fn is_cuda(&self) -> bool {
         matches!(self.device, Device::Cuda(_))
+    }
+
+    pub fn shape(&self) -> &Vec<usize> {
+        &self.shape
     }
 
     pub fn numel(&self) -> usize {

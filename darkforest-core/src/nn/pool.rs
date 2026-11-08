@@ -38,12 +38,14 @@ impl MaxPool2d {
 
         let x_data = xt.to_vec();
         let mut out_data = vec![f32::NEG_INFINITY; batch * c * out_h * out_w];
+        let mut max_indices = vec![0usize; batch * c * out_h * out_w];
 
         for b in 0..batch {
             for ch in 0..c {
                 for oh in 0..out_h {
                     for ow in 0..out_w {
                         let mut max_val = f32::NEG_INFINITY;
+                        let mut max_pos = 0usize;
                         let ih_start = (oh * sh) as isize - ph as isize;
                         let iw_start = (ow * sw) as isize - pw as isize;
 
@@ -62,6 +64,7 @@ impl MaxPool2d {
                                         + (cur_w as usize);
                                     if x_data[in_idx] > max_val {
                                         max_val = x_data[in_idx];
+                                        max_pos = in_idx;
                                     }
                                 }
                             }
@@ -73,16 +76,28 @@ impl MaxPool2d {
                         } else {
                             max_val
                         };
+                        max_indices[out_idx] = max_pos;
                     }
                 }
             }
         }
 
-        Ok(Value::leaf(Tensor::from_vec_device(
+        let out_t = Tensor::from_vec_device(
             out_data,
             vec![batch, c, out_h, out_w],
-            xt.device,
-        )?))
+            xt.device.clone(),
+        )?;
+
+        if !crate::autograd::is_grad_enabled() {
+            return Ok(Value::leaf(out_t));
+        }
+
+        let grad_fn = Box::new(crate::autograd::grad_fn::MaxPool2dGradFn {
+            in_shape: xt.shape.clone(),
+            max_indices,
+        });
+
+        Ok(Value::from_op(out_t, grad_fn, vec![x.clone()]))
     }
 }
 

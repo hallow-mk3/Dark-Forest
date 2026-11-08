@@ -37,6 +37,11 @@ path = "src/bin/granular_bench.rs"
 name = "darkforest_cli"
 path = "src/bin/darkforest_cli.rs"
 
+[[bin]]
+name = "bench_sequence_limit"
+path = "src/bin/bench_sequence_limit.rs"
+required-features = ["cuda"]
+
 [dependencies]
 thiserror  = { workspace = true }
 anyhow     = { workspace = true }

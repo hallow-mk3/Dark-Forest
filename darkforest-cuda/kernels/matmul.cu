@@ -353,7 +353,7 @@ extern "C" void launch_adamw_update(
     float bias_correction2
 ) {
     uint32_t threads = 256;
-    uint32_t blocks  = (n / 4 + threads - 1) / threads;
+    uint32_t blocks  = ((n + 3) / 4 + threads - 1) / threads;
     if (blocks == 0) blocks = 1;
     kernel_adamw_update<<<blocks, threads>>>(
         parameter, first_moment, second_moment, gradient, n,

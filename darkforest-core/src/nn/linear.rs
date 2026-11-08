@@ -42,10 +42,7 @@ impl Linear {
 
         // x: [batch..., in_features]
         // weight: [out_features, in_features] -> transpose to [in_features, out_features]
-        let w_t = {
-            let wt = self.weight.tensor().transpose_last_two()?;
-            Value::leaf(wt)
-        };
+        let w_t = self.weight.transpose_last_two()?;
         let out = x.matmul(&w_t)?;
 
         if let Some(ref b) = self.bias {

@@ -1,6 +1,6 @@
 //! Index ops — gather, scatter, index_select, masked_fill, where_, slice, narrow.
 
-use crate::tensor::{numel, Tensor};
+use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
 
 // ---------------------------------------------------------------------------

@@ -32,7 +32,37 @@ mod cuda_runtime {
             kind: i32,
             stream: *mut c_void,
         ) -> i32;
+        pub fn cudaSetDevice(device: i32) -> i32;
+        pub fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> i32;
     }
+}
+
+pub fn get_memory_info() -> Result<(usize, usize)> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        let mut free = 0usize;
+        let mut total = 0usize;
+        let code = cuda_runtime::cudaMemGetInfo(&mut free, &mut total);
+        if code != 0 {
+            return Err(anyhow!("cudaMemGetInfo failed with code {code}"));
+        }
+        return Ok((free, total));
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow!("CUDA not available"))
+}
+
+pub fn set_device(device_id: u32) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        let code = cuda_runtime::cudaSetDevice(device_id as i32);
+        if code != 0 {
+            return Err(anyhow!("cudaSetDevice({device_id}) failed with code {code}"));
+        }
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow!("CUDA not available"))
 }
 
 // ---------------------------------------------------------------------------
@@ -363,10 +393,8 @@ impl PinnedBuffer {
         }
         #[cfg(not(darkforest_cuda_kernels))]
         {
-            // Fallback: heap allocation
-            let mut v = vec![0u8; bytes];
-            let ptr = v.as_mut_ptr();
-            std::mem::forget(v);
+            let boxed = vec![0u8; bytes].into_boxed_slice();
+            let ptr = Box::into_raw(boxed) as *mut u8;
             Ok(PinnedBuffer { ptr, bytes })
         }
     }
@@ -398,8 +426,8 @@ impl Drop for PinnedBuffer {
             }
             #[cfg(not(darkforest_cuda_kernels))]
             {
-                // Reclaim heap allocation
-                unsafe { drop(Vec::from_raw_parts(self.ptr, self.bytes, self.bytes)) };
+                let slice = unsafe { std::slice::from_raw_parts_mut(self.ptr, self.bytes) };
+                let _ = unsafe { Box::from_raw(slice) };
             }
         }
     }

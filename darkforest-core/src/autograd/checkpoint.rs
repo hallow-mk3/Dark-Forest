@@ -29,7 +29,7 @@ where
             (self.forward_fn)(&recomputed_in).expect("Checkpoint recomputation forward failed");
 
         // Seed gradient into recomputed output and run backward
-        recomputed_out._backward_recursive(grad_output);
+        recomputed_out.backward_with_grad(grad_output);
 
         let in_grad = recomputed_in.grad_tensor().unwrap_or_else(|| {
             Tensor::zeros_device(self.input.shape(), self.input.tensor().device.clone())

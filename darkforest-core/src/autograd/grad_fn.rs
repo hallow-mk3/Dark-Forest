@@ -469,3 +469,260 @@ impl GradFn for EmbeddingGradFn {
         vec![0]
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// TransposeLastTwoGradFn
+// ---------------------------------------------------------------------------
+pub struct TransposeLastTwoGradFn;
+
+impl GradFn for TransposeLastTwoGradFn {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let gt = grad_output.transpose_last_two().expect("transpose_last_two backward failed");
+        vec![gt]
+    }
+    fn required_inputs(&self) -> Vec<usize> {
+        vec![0]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conv2dGradFn
+// ---------------------------------------------------------------------------
+pub struct Conv2dGradFn {
+    pub x: Tensor,
+    pub weight: Tensor,
+    pub stride: (usize, usize),
+    pub padding: (usize, usize),
+    pub has_bias: bool,
+}
+
+impl GradFn for Conv2dGradFn {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let xt = &self.x;
+        let wt = &self.weight;
+        let (batch, in_c, h, w) = (xt.shape[0], xt.shape[1], xt.shape[2], xt.shape[3]);
+        let (out_c, _, kh, kw) = (wt.shape[0], wt.shape[1], wt.shape[2], wt.shape[3]);
+        let (out_h, out_w) = (grad_output.shape[2], grad_output.shape[3]);
+        let (sh, sw) = self.stride;
+        let (ph, pw) = self.padding;
+
+        let g_data = grad_output.to_vec();
+        let x_data = xt.to_vec();
+        let w_data = wt.to_vec();
+
+        let mut grad_x = vec![0.0f32; xt.numel()];
+        let mut grad_w = vec![0.0f32; wt.numel()];
+        let mut grad_b = if self.has_bias { vec![0.0f32; out_c] } else { Vec::new() };
+
+        for b in 0..batch {
+            for oc in 0..out_c {
+                for oh in 0..out_h {
+                    for ow in 0..out_w {
+                        let g_idx = b * (out_c * out_h * out_w) + oc * (out_h * out_w) + oh * out_w + ow;
+                        let g = g_data[g_idx];
+                        if self.has_bias {
+                            grad_b[oc] += g;
+                        }
+                        let ih_start = (oh * sh) as isize - ph as isize;
+                        let iw_start = (ow * sw) as isize - pw as isize;
+
+                        for ic in 0..in_c {
+                            for f_h in 0..kh {
+                                for f_w in 0..kw {
+                                    let cur_h = ih_start + f_h as isize;
+                                    let cur_w = iw_start + f_w as isize;
+                                    if cur_h >= 0 && cur_h < h as isize && cur_w >= 0 && cur_w < w as isize {
+                                        let in_idx = b * (in_c * h * w) + ic * (h * w) + (cur_h as usize) * w + (cur_w as usize);
+                                        let w_idx = oc * (in_c * kh * kw) + ic * (kh * kw) + f_h * kw + f_w;
+                                        grad_w[w_idx] += g * x_data[in_idx];
+                                        grad_x[in_idx] += g * w_data[w_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let gx = Tensor::from_vec_device(grad_x, xt.shape.clone(), xt.device.clone()).unwrap();
+        let gw = Tensor::from_vec_device(grad_w, wt.shape.clone(), wt.device.clone()).unwrap();
+        if self.has_bias {
+            let gb = Tensor::from_vec_device(grad_b, vec![out_c], xt.device.clone()).unwrap();
+            vec![gx, gw, gb]
+        } else {
+            vec![gx, gw]
+        }
+    }
+
+    fn required_inputs(&self) -> Vec<usize> {
+        if self.has_bias { vec![0, 1, 2] } else { vec![0, 1] }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conv1dGradFn
+// ---------------------------------------------------------------------------
+pub struct Conv1dGradFn {
+    pub x: Tensor,
+    pub weight: Tensor,
+    pub stride: usize,
+    pub padding: usize,
+    pub has_bias: bool,
+}
+
+impl GradFn for Conv1dGradFn {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let xt = &self.x;
+        let wt = &self.weight;
+        let (batch, in_c, l) = (xt.shape[0], xt.shape[1], xt.shape[2]);
+        let (out_c, _, k) = (wt.shape[0], wt.shape[1], wt.shape[2]);
+        let out_l = grad_output.shape[2];
+        let s = self.stride;
+        let p = self.padding;
+
+        let g_data = grad_output.to_vec();
+        let x_data = xt.to_vec();
+        let w_data = wt.to_vec();
+
+        let mut grad_x = vec![0.0f32; xt.numel()];
+        let mut grad_w = vec![0.0f32; wt.numel()];
+        let mut grad_b = if self.has_bias { vec![0.0f32; out_c] } else { Vec::new() };
+
+        for b in 0..batch {
+            for oc in 0..out_c {
+                for ol in 0..out_l {
+                    let g_idx = b * (out_c * out_l) + oc * out_l + ol;
+                    let g = g_data[g_idx];
+                    if self.has_bias {
+                        grad_b[oc] += g;
+                    }
+                    let il_start = (ol * s) as isize - p as isize;
+                    for ic in 0..in_c {
+                        for f_k in 0..k {
+                            let cur_l = il_start + f_k as isize;
+                            if cur_l >= 0 && cur_l < l as isize {
+                                let in_idx = b * (in_c * l) + ic * l + (cur_l as usize);
+                                let w_idx = oc * (in_c * k) + ic * k + f_k;
+                                grad_w[w_idx] += g * x_data[in_idx];
+                                grad_x[in_idx] += g * w_data[w_idx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let gx = Tensor::from_vec_device(grad_x, xt.shape.clone(), xt.device.clone()).unwrap();
+        let gw = Tensor::from_vec_device(grad_w, wt.shape.clone(), wt.device.clone()).unwrap();
+        if self.has_bias {
+            let gb = Tensor::from_vec_device(grad_b, vec![out_c], xt.device.clone()).unwrap();
+            vec![gx, gw, gb]
+        } else {
+            vec![gx, gw]
+        }
+    }
+
+    fn required_inputs(&self) -> Vec<usize> {
+        if self.has_bias { vec![0, 1, 2] } else { vec![0, 1] }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BatchNormGradFn
+// ---------------------------------------------------------------------------
+pub struct BatchNormGradFn {
+    pub x: Tensor,
+    pub gamma: Tensor,
+    pub means: Vec<f32>,
+    pub rstds: Vec<f32>,
+}
+
+impl GradFn for BatchNormGradFn {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let xt = &self.x;
+        let n = xt.shape[0];
+        let c = xt.shape[1];
+        let spatial: usize = xt.shape[2..].iter().product::<usize>().max(1);
+        let num_per_channel = n * spatial;
+
+        let g_data = grad_output.to_vec();
+        let x_data = xt.to_vec();
+        let gamma_data = self.gamma.to_vec();
+
+        let mut grad_x = vec![0.0f32; xt.numel()];
+        let mut grad_gamma = vec![0.0f32; c];
+        let mut grad_beta = vec![0.0f32; c];
+
+        for ch in 0..c {
+            let mean = self.means[ch];
+            let rstd = self.rstds[ch];
+            let g_val = gamma_data[ch];
+
+            let mut sum_dout = 0.0f32;
+            let mut sum_dout_xhat = 0.0f32;
+
+            for b in 0..n {
+                for s in 0..spatial {
+                    let idx = b * (c * spatial) + ch * spatial + s;
+                    let dout = g_data[idx];
+                    let xhat = (x_data[idx] - mean) * rstd;
+                    sum_dout += dout;
+                    sum_dout_xhat += dout * xhat;
+                    grad_gamma[ch] += dout * xhat;
+                    grad_beta[ch] += dout;
+                }
+            }
+
+            let m_f = num_per_channel as f32;
+            let factor = g_val * rstd / m_f;
+
+            for b in 0..n {
+                for s in 0..spatial {
+                    let idx = b * (c * spatial) + ch * spatial + s;
+                    let dout = g_data[idx];
+                    let xhat = (x_data[idx] - mean) * rstd;
+                    grad_x[idx] = factor * (m_f * dout - sum_dout - xhat * sum_dout_xhat);
+                }
+            }
+        }
+
+        let gx = Tensor::from_vec_device(grad_x, xt.shape.clone(), xt.device.clone()).unwrap();
+        let gg = Tensor::from_vec_device(grad_gamma, vec![c], xt.device.clone()).unwrap();
+        let gb = Tensor::from_vec_device(grad_beta, vec![c], xt.device.clone()).unwrap();
+        vec![gx, gg, gb]
+    }
+
+    fn required_inputs(&self) -> Vec<usize> {
+        vec![0, 1, 2]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MaxPool2dGradFn
+// ---------------------------------------------------------------------------
+pub struct MaxPool2dGradFn {
+    pub in_shape: Vec<usize>,
+    pub max_indices: Vec<usize>,
+}
+
+impl GradFn for MaxPool2dGradFn {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let n = crate::tensor::numel(&self.in_shape);
+        let mut grad_x = vec![0.0f32; n];
+        let g_data = grad_output.to_vec();
+
+        for (out_idx, &in_idx) in self.max_indices.iter().enumerate() {
+            if in_idx < n {
+                grad_x[in_idx] += g_data[out_idx];
+            }
+        }
+
+        vec![Tensor::from_vec_device(grad_x, self.in_shape.clone(), grad_output.device.clone()).unwrap()]
+    }
+
+    fn required_inputs(&self) -> Vec<usize> {
+        vec![0]
+    }
+}

@@ -113,33 +113,45 @@ impl Conv2d {
             }
         }
 
-        let mut out_val = Value::leaf(Tensor::from_vec_device(
-            out_data,
-            vec![batch, self.out_channels, out_h, out_w],
-            xt.device.clone(),
-        )?);
-
         if let Some(ref b) = self.bias {
             let b_data = b.tensor().to_vec();
-            let mut v_data = out_val.tensor().to_vec();
             for nb in 0..batch {
                 for oc in 0..self.out_channels {
                     let bias_val = b_data[oc];
                     for p in 0..(out_h * out_w) {
                         let idx =
                             nb * (self.out_channels * out_h * out_w) + oc * (out_h * out_w) + p;
-                        v_data[idx] += bias_val;
+                        out_data[idx] += bias_val;
                     }
                 }
             }
-            out_val = Value::leaf(Tensor::from_vec_device(
-                v_data,
-                vec![batch, self.out_channels, out_h, out_w],
-                xt.device,
-            )?);
         }
 
-        Ok(out_val)
+        let out_t = Tensor::from_vec_device(
+            out_data,
+            vec![batch, self.out_channels, out_h, out_w],
+            xt.device.clone(),
+        )?;
+
+        if !crate::autograd::is_grad_enabled() {
+            return Ok(Value::leaf(out_t));
+        }
+
+        let has_bias = self.bias.is_some();
+        let grad_fn = Box::new(crate::autograd::grad_fn::Conv2dGradFn {
+            x: xt,
+            weight: self.weight.tensor(),
+            stride: self.stride,
+            padding: self.padding,
+            has_bias,
+        });
+
+        let mut inputs = vec![x.clone(), self.weight.clone()];
+        if let Some(ref b) = self.bias {
+            inputs.push(b.clone());
+        }
+
+        Ok(Value::from_op(out_t, grad_fn, inputs))
     }
 
     pub fn parameters(&self) -> Vec<Value> {
@@ -227,31 +239,43 @@ impl Conv1d {
             }
         }
 
-        let mut out_val = Value::leaf(Tensor::from_vec_device(
-            out_data,
-            vec![batch, self.out_channels, out_l],
-            xt.device.clone(),
-        )?);
-
         if let Some(ref b) = self.bias {
             let b_data = b.tensor().to_vec();
-            let mut v_data = out_val.tensor().to_vec();
             for nb in 0..batch {
                 for oc in 0..self.out_channels {
                     let bias_val = b_data[oc];
                     for ol in 0..out_l {
-                        v_data[nb * (self.out_channels * out_l) + oc * out_l + ol] += bias_val;
+                        out_data[nb * (self.out_channels * out_l) + oc * out_l + ol] += bias_val;
                     }
                 }
             }
-            out_val = Value::leaf(Tensor::from_vec_device(
-                v_data,
-                vec![batch, self.out_channels, out_l],
-                xt.device,
-            )?);
         }
 
-        Ok(out_val)
+        let out_t = Tensor::from_vec_device(
+            out_data,
+            vec![batch, self.out_channels, out_l],
+            xt.device.clone(),
+        )?;
+
+        if !crate::autograd::is_grad_enabled() {
+            return Ok(Value::leaf(out_t));
+        }
+
+        let has_bias = self.bias.is_some();
+        let grad_fn = Box::new(crate::autograd::grad_fn::Conv1dGradFn {
+            x: xt,
+            weight: self.weight.tensor(),
+            stride: self.stride,
+            padding: self.padding,
+            has_bias,
+        });
+
+        let mut inputs = vec![x.clone(), self.weight.clone()];
+        if let Some(ref b) = self.bias {
+            inputs.push(b.clone());
+        }
+
+        Ok(Value::from_op(out_t, grad_fn, inputs))
     }
 
     pub fn parameters(&self) -> Vec<Value> {

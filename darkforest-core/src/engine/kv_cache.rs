@@ -63,13 +63,7 @@ impl KVCache {
             ));
         }
         let pos = self.seq_lens[batch_idx];
-        self.append_step(layer_idx, batch_idx, k_step, v_step, pos)?;
-
-        if layer_idx == self.n_layers - 1 {
-            self.seq_lens[batch_idx] += 1;
-        }
-
-        Ok(())
+        self.append_step(layer_idx, batch_idx, k_step, v_step, pos)
     }
 
     /// Append single-token Key and Value vectors at an explicit position `pos`.
@@ -148,7 +142,7 @@ impl KVCache {
             }
         }
 
-        if pos >= self.seq_lens[batch_idx] {
+        if layer_idx == self.n_layers - 1 && pos >= self.seq_lens[batch_idx] {
             self.seq_lens[batch_idx] = pos + 1;
         }
 

@@ -61,7 +61,7 @@ __global__ void kernel_fill(float* __restrict__ c, float val, uint32_t n) {
 
 extern "C" void launch_fill(float* c, float val, uint32_t n) {
     uint32_t threads = 256;
-    uint32_t blocks  = (n / 4 + threads - 1) / threads;
+    uint32_t blocks  = ((n + 3) / 4 + threads - 1) / threads;
     if (blocks == 0) blocks = 1;
     kernel_fill<<<blocks, threads>>>(c, val, n);
 }
@@ -90,7 +90,7 @@ __global__ void kernel_add(const float* __restrict__ a,
 
 extern "C" void launch_add(const float* a, const float* b, float* c, uint32_t n) {
     uint32_t threads = 256;
-    uint32_t blocks  = (n / 4 + threads - 1) / threads;
+    uint32_t blocks  = ((n + 3) / 4 + threads - 1) / threads;
     if (blocks == 0) blocks = 1;
     kernel_add<<<blocks, threads>>>(a, b, c, n);
 }
@@ -118,7 +118,7 @@ __global__ void kernel_scale(const float* __restrict__ a,
 
 extern "C" void launch_scale(const float* a, float alpha, float* c, uint32_t n) {
     uint32_t threads = 256;
-    uint32_t blocks  = (n / 4 + threads - 1) / threads;
+    uint32_t blocks  = ((n + 3) / 4 + threads - 1) / threads;
     if (blocks == 0) blocks = 1;
     kernel_scale<<<blocks, threads>>>(a, alpha, c, n);
 }
@@ -147,7 +147,7 @@ __global__ void kernel_mul(const float* __restrict__ a,
 
 extern "C" void launch_mul(const float* a, const float* b, float* c, uint32_t n) {
     uint32_t threads = 256;
-    uint32_t blocks  = (n / 4 + threads - 1) / threads;
+    uint32_t blocks  = ((n + 3) / 4 + threads - 1) / threads;
     if (blocks == 0) blocks = 1;
     kernel_mul<<<blocks, threads>>>(a, b, c, n);
 }

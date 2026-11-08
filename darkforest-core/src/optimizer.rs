@@ -90,6 +90,7 @@ impl AdamW {
         };
 
         for (pi, param) in params.iter().enumerate() {
+            #[cfg(feature = "cuda")]
             let is_cuda = param.tensor().is_cuda();
 
             #[cfg(feature = "cuda")]
@@ -100,11 +101,20 @@ impl AdamW {
                 let mut p_guard = p_tensor.data_mut();
                 let g_guard = g_tensor.data();
 
+                let g_dev = g_guard.device_tensor();
+                let g_scaled;
+                let g_ptr = if (clip_scale - 1.0).abs() > 1e-6 {
+                    g_scaled = g_dev.scale(clip_scale).expect("CUDA scale gradient failed");
+                    &g_scaled
+                } else {
+                    g_dev
+                };
+
                 darkforest_cuda::DeviceTensor::adamw_update(
                     p_guard.device_tensor_mut(),
                     m,
                     v,
-                    g_guard.device_tensor(),
+                    g_ptr,
                     self.lr,
                     self.beta1,
                     self.beta2,

@@ -116,7 +116,7 @@ impl DeviceLoRAAdapter {
                 z * std_a
             })
             .collect();
-        let a = DeviceTensor::from_host_slice(&h_a, vec![rank, in_features])?;
+        let a = DeviceTensor::from_host(&h_a, vec![rank, in_features])?;
 
         // Zero init for B: so LoRA delta is initially 0 (exact base model identity)
         let b = DeviceTensor::zeros(vec![out_features, rank])?;
@@ -210,6 +210,8 @@ impl DeviceLoRAAdapter {
             &self.b, &self.m_b, &self.v_b, &self.d_b, lr, beta1, beta2, eps, wd, bc1, bc2,
         )?;
         Ok(())
+    }
+
     /// Merge this low-rank adapter directly into the base weight tensor:
     ///   W_base += scaling * (B @ A)
     /// and reset B to 0 (so adapter delta is cleared).

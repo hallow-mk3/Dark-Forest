@@ -91,10 +91,7 @@ impl MultiHeadAttention {
 
         // --- single-head attention (Phase 1 CPU baseline) ---
         // scores = Q · K^T / sqrt(d_model): [seq_len, seq_len]
-        let k_t = {
-            let kt = k.tensor().transpose_last_two()?;
-            Value::leaf(kt)
-        };
+        let k_t = k.transpose_last_two()?;
         let scores_raw = q.matmul(&k_t)?;
         let scores_scaled = scores_raw.scale(scale)?;
 

@@ -133,57 +133,74 @@ impl Value {
     // -----------------------------------------------------------------------
 
     /// Backpropagate gradients from this value (should be scalar loss).
-    /// Seeds this node's gradient with 1.0 and traverses in reverse topo order.
+    /// Seeds this node's gradient with 1.0 and traverses in true topological order.
     pub fn backward(&self) {
-        let root_grad = {
-            let mut inner = self.0.lock().unwrap();
-            let n = inner.tensor.numel();
-            let norm = 1.0f32 / n as f32;
-            let shape = inner.tensor.shape.clone();
-            let device = inner.tensor.device.clone();
-            let seed_tensor = if n == 1 {
-                Tensor::from_vec_device(vec![1.0], shape, device).unwrap()
-            } else {
-                Tensor::from_vec_device(vec![norm; n], shape, device).unwrap()
-            };
-            inner.grad = Some(seed_tensor.clone());
-            seed_tensor
+        let (n, shape, device) = {
+            let inner = self.0.lock().unwrap();
+            (inner.tensor.numel(), inner.tensor.shape.clone(), inner.tensor.device.clone())
         };
-        self._backward_recursive(&root_grad);
+        if n != 1 {
+            panic!("grad can be implicitly created only for scalar outputs (got numel = {n}). Pass an explicit gradient for vector outputs.");
+        }
+        let seed = Tensor::from_vec_device(vec![1.0], shape, device).unwrap();
+        self.backward_with_grad(&seed);
     }
 
-    pub(crate) fn _backward_recursive(&self, upstream_grad: &Tensor) {
-        let (grad_fn_opt, inputs) = {
-            let inner = self.0.lock().unwrap();
-            if inner.grad_fn.is_none() {
-                return;
-            }
-            (true, inner.inputs.clone())
-        };
-
-        if !grad_fn_opt {
-            return;
+    /// Backpropagate gradients starting with an explicit gradient tensor in true topological order.
+    pub fn backward_with_grad(&self, root_grad: &Tensor) {
+        {
+            let mut inner = self.0.lock().unwrap();
+            inner.grad = Some(root_grad.clone());
         }
 
-        let (grad_inputs, req) = {
-            let inner = self.0.lock().unwrap();
-            if let Some(ref gfn) = inner.grad_fn {
-                (gfn.backward(upstream_grad), gfn.required_inputs())
-            } else {
-                return;
-            }
-        };
+        // 1. Build topological ordering via post-order DFS
+        let mut topo: Vec<Value> = Vec::new();
+        let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-        for (grad_idx, &input_idx) in req.iter().enumerate() {
-            if let Some(input) = inputs.get(input_idx) {
-                if let Some(grad_t) = grad_inputs.get(grad_idx) {
-                    {
+        fn build_topo(
+            node: &Value,
+            visited: &mut std::collections::HashSet<usize>,
+            topo: &mut Vec<Value>,
+        ) {
+            let ptr = Arc::as_ptr(&node.0) as usize;
+            if visited.insert(ptr) {
+                let inputs = {
+                    let inner = node.0.lock().unwrap();
+                    inner.inputs.clone()
+                };
+                for child in inputs {
+                    build_topo(&child, visited, topo);
+                }
+                topo.push(node.clone());
+            }
+        }
+
+        build_topo(self, &mut visited, &mut topo);
+
+        // 2. Traverse nodes in reverse topological order (loss -> intermediate nodes -> leaves)
+        for node in topo.iter().rev() {
+            let (_upstream_grad, grad_inputs, req, inputs) = {
+                let inner = node.0.lock().unwrap();
+                let gfn = match &inner.grad_fn {
+                    Some(gfn) => gfn,
+                    None => continue, // Leaf node, no inputs to propagate to
+                };
+                let upstream = match &inner.grad {
+                    Some(g) => g.clone(),
+                    None => continue,
+                };
+                let grad_inputs = gfn.backward(&upstream);
+                let req = gfn.required_inputs();
+                (upstream, grad_inputs, req, inner.inputs.clone())
+            };
+
+            for (grad_idx, &input_idx) in req.iter().enumerate() {
+                if let Some(input) = inputs.get(input_idx) {
+                    if let Some(grad_t) = grad_inputs.get(grad_idx) {
                         let mut inp_inner = input.0.lock().unwrap();
                         if let Some(ref inp_g) = inp_inner.grad {
-                            // inp_g is the Tensor holding accumulated grad in its storage
                             inp_g.add_storage_inplace(grad_t);
                         } else {
-                            // Initialize a zero grad tensor on matching device then add
                             let new_g = Tensor::zeros_device(
                                 inp_inner.tensor.shape.clone(),
                                 inp_inner.tensor.device.clone(),
@@ -192,10 +209,20 @@ impl Value {
                             inp_inner.grad = Some(new_g);
                         }
                     }
-                    input._backward_recursive(grad_t);
                 }
             }
         }
+    }
+
+    /// Transpose the last two dimensions of this Value, maintaining autograd tracking.
+    pub fn transpose_last_two(&self) -> Result<Value> {
+        let t = self.tensor();
+        let out = t.transpose_last_two()?;
+        if !is_grad_enabled() {
+            return Ok(Value::leaf(out));
+        }
+        let grad_fn = Box::new(crate::autograd::grad_fn::TransposeLastTwoGradFn);
+        Ok(Value::from_op(out, grad_fn, vec![self.clone()]))
     }
 
     // -----------------------------------------------------------------------
