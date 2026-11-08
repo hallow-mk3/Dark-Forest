@@ -11,8 +11,13 @@ pub mod grad_check;
 pub mod nn;
 pub mod ops;
 pub mod optimizer;
+pub mod provenance;
 pub mod scheduler;
+pub mod semantic_type;
 pub mod tensor;
+
+pub use provenance::{AuditReport, ProvenanceChain, StepCommitment};
+pub use semantic_type::{SemanticConcept, SemanticContract, TypeCheckResult};
 
 pub use autograd::{checkpoint, no_grad};
 pub use data::{DataLoader, Dataset, TensorDataset};

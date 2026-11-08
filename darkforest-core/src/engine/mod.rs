@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod generate;
+pub mod holographic;
 pub mod kv_cache;
 pub mod lora;
 pub mod safetensors;
@@ -17,6 +18,7 @@ pub use generate::{
     argmax, generate, generate_static, generate_static_fast, sample_next_token, sample_next_token_slice,
     sample_next_token_slice_with_context, GenerationReport, SamplerConfig, StopReason,
 };
+pub use holographic::{HolographicCache, HolographicConfig, HolographicLayerCache};
 pub use kv_cache::KVCache;
 pub use lora::{StaticLoRAConfig, StaticLoRAGPT2};
 pub use safetensors::{load_gpt2_safetensors, save_gpt2_safetensors, SafeTensorsFile, TensorMeta};
