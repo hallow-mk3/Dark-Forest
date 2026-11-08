@@ -6,6 +6,7 @@
 pub mod autograd;
 pub mod data;
 pub mod engine;
+pub mod functional;
 pub mod grad_check;
 pub mod nn;
 pub mod ops;

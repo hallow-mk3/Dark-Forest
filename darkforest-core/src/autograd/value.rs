@@ -264,6 +264,11 @@ impl Value {
         ))
     }
 
+    pub fn sub(&self, other: &Value) -> Result<Value> {
+        let neg_other = other.scale(-1.0)?;
+        self.add(&neg_other)
+    }
+
     pub fn scale(&self, alpha: f32) -> Result<Value> {
         let t = self.tensor();
         let out = if t.is_cuda() {
