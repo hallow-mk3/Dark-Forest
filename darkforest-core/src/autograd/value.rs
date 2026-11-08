@@ -128,6 +128,15 @@ impl Value {
         }
     }
 
+    pub fn accumulate_grad(&self, grad: &Tensor) {
+        let mut inner = self.0.lock().unwrap();
+        if let Some(ref current) = inner.grad {
+            current.add_storage_inplace(grad);
+        } else {
+            inner.grad = Some(grad.clone());
+        }
+    }
+
     // -----------------------------------------------------------------------
     // backward()
     // -----------------------------------------------------------------------

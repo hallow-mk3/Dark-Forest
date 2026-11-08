@@ -4,6 +4,7 @@
 //! Architecture: Tensor → Ops → Autograd Graph → Optimizer
 
 pub mod autograd;
+pub mod cluster;
 pub mod data;
 pub mod engine;
 pub mod functional;
@@ -16,6 +17,10 @@ pub mod scheduler;
 pub mod semantic_type;
 pub mod tensor;
 
+pub use cluster::{
+    all_gather, all_reduce_ring, broadcast, reduce_scatter, ChannelHub, ChannelTransport,
+    ClusterBackend, ClusterConfig, DistributedDataParallel, ReduceOp, TcpTransport, Transport,
+};
 pub use provenance::{AuditReport, ProvenanceChain, StepCommitment};
 pub use semantic_type::{SemanticConcept, SemanticContract, TypeCheckResult};
 
