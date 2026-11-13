@@ -25,7 +25,7 @@ except ImportError:
     darkforest = None
 
 class PyTorchGPT2Small(nn.Module):
-    def __init__(self, vocab_size=50257, d_model=768, n_heads=1, n_layers=12, max_len=1024):
+    def __init__(self, vocab_size=50257, d_model=768, n_heads=12, n_layers=12, max_len=1024):
         super().__init__()
         self.tok_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(max_len, d_model)
@@ -88,7 +88,7 @@ def benchmark_pytorch(steps=20, seq_len=128, batch_size=1, warmup_steps=5, repea
         for _ in range(steps):
             optimizer.zero_grad()
             out = model(inputs)
-            loss = loss_fn(out.view(-1, 256), targets.view(-1))
+            loss = loss_fn(out.view(-1, vocab_size), targets.view(-1))
             loss.backward()
             optimizer.step()
 

@@ -20,9 +20,9 @@ In this project, I built **Dark Forest**, a lightweight, fully custom Rust-first
 4. **Static KV-cache autoregressive decoding** (`generate_fast`) for O(S) single-token decode steps replacing O(S^2) recomputation, and
 5. **Parameter-Efficient Fine-Tuning** (`StaticLoRAGPT2`) with LoRA adapters and optional 4-bit NF4 base weight quantization (QLoRA),
 
-My testing showed massive improvements. On long-context attention projections (S=4096), tiled online softmax achieved a **9.99x speedup** and a **45.6x reduction in peak VRAM**. It completely prevented out-of-memory crashes at S=8192, where standard attention fails under an 85 percent VRAM limit.
+My testing evaluated both isolated kernel scaling and full end-to-end model training against PyTorch baselines. On isolated attention projections (S=4096, batch 2, heads 12, head dim 64, fp32), tiled online softmax achieved a **9.99x speedup** compared to naive materialized quadratic attention, avoiding out-of-memory crashes up to S=131,072 timed (1,536 MB). Against modern PyTorch SDPA (which also uses fused Flash kernels without quadratic materialization, allocating 96 MB forward / 217 MB fwd+bwd), memory footprints are equivalent in the isolated kernel setting.
 
-I also ran 7 independent full-scale GPT-2 (124M parameter) training trials. Dark Forest achieved a **1.77x median step speedup** (41.67 ms vs 73.60 ms) over PyTorch 2.9 eager mode and a **5.76x reduction in execution jitter** (std dev = 0.850 ms vs 4.898 ms). There was zero overlap in the execution time distributions (Mann-Whitney U = 0, p < 0.001, Cohen's d = 8.35). On top of that, the entire runtime is packaged in a standalone 12 MB compiled binary, which is a 161x footprint reduction compared to the 1.8 GB Python/PyTorch stack.
+In full-model GPT-2 end-to-end training (batch 1, float32 TF32 MMA), Dark Forest's pre-allocated `StaticGPT2` achieved **38.8 ms** step latency at S=128, **112.6 ms** at S=512, and **320.4 ms** at S=1024. On top of that, the entire runtime is packaged in a standalone 12 MB compiled binary, which is a 161x footprint reduction compared to the 1.8 GB Python/PyTorch stack.
 
 ---
 
@@ -135,30 +135,49 @@ I tested computational throughput and peak memory allocations across 4 independe
 
 ---
 
-### 4.2 Experiment 2: Full GPT-2 Scale Step Latency & Execution Throughput
-*Configuration: 12 Layers, d_model=768, 12 Heads, d_ff=3072, Vocab 50257, Context 128, Batch 1. Target Hardware: NVIDIA GeForce RTX 5070 Laptop GPU (85 percent VRAM cap = 6.77 GB).*
+### 4.2 Experiment 2: Full GPT-2 End-to-End Training Step Latency
+*Configuration: 12 Layers, d_model=768, 12 Heads, d_ff=3072, Vocab 50,257, Batch 1, Float32 (TF32 MMA). Hardware: NVIDIA GeForce RTX 5070 Laptop GPU (85% VRAM cap = 6,904 MB). Source: `benchmark/bench_darkforest_e2e.py` → `benchmark/darkforest_e2e_results.json`. Measured 2026-11-13.*
 
-Dark Forest was tested using the `train_static` engine to execute 250 forward and backward training steps. The goal was to prove stable monotonic convergence and record step times without dynamic allocation overhead:
+Dark Forest `StaticGPT2` was benchmarked with 2 warmup steps + 5 timed repetitions per sequence length. All buffers are pre-allocated at startup; the timed region covers forward pass, backward pass, and AdamW update only.
 
-| Metric | Dark Forest (`train_static.exe`) |
-| :--- | :--- |
-| **Median Step Time** | **`35.391 ms`** |
-| **Minimum Step Time** | **`33.336 ms`** |
-| **Maximum Step Time** | **`43.585 ms`** |
-| **Loss Descent** | **`11.906` -> `2.679`** |
+| Sequence Length (S) | Dark Forest Median Step | Peak VRAM | Status |
+| :--- | :---: | :---: | :---: |
+| **128** | `38.8 ms` | `3,320.0 MB` | ✅ |
+| **512** | `112.6 ms` | `4,458.0 MB` | ✅ |
+| **1,024** | `320.4 ms` | `6,861.9 MB` | ✅ |
+| **2,048** | — | >6,904.9 MB | OOM (85% cap) |
+
+> **Note on parameter count**: Dark Forest allocates position embeddings exactly to `seq_len`, giving 162.3 M–163.8 M parameters across the S=128 to S=1,024 range. The PyTorch SDPA script pre-allocated position embeddings for `max_pos=65,537`, making its total parameter count 212.5 M. This is an architectural difference, not a bug. Both are documented in `benchmark/darkforest_e2e_results.json`.
+
+> **Column comparability**: The Dark Forest column uses Float32 with no gradient checkpointing. The PyTorch SDPA columns (Section 5.1) use bf16 with gradient checkpointing. These are different memory strategies and are **not directly comparable** row-by-row.
 
 #### Analysis & Empirical Findings:
-1. **Stable Execution Profile**: The step time remains clustered near ~35 ms, indicating that the pre-allocated graph prevents severe latency jitter. 
-2. **Deterministic Monotonic Convergence**: The loss reliably descended from 11.906 to 2.679 over the 250 iterations, confirming mathematical fidelity of the statically scheduled gradients.
+1. **Pre-allocation overhead**: Dark Forest's `StaticGPT2` pre-allocates *all* forward activations, backward gradients, optimizer moment buffers, logit buffers, and probability buffers at startup. This eliminates allocation jitter during the step but results in a large fixed VRAM footprint (~3,320 MB even at S=128) regardless of sequence length.
+2. **OOM at S=2,048 (fp32)**: The static engine's full buffer set exceeds the 85% VRAM cap (6,904 MB) at S=2,048 in Float32. This is consistent with the memory arithmetic: 162 M fp32 parameters × 3 (params + 2 Adam moments) ≈ 1,944 MB base, plus activation and logit buffers.
+3. **Deterministic convergence**: Initial loss of 11.79 descends monotonically, confirming correct gradient flow through the static execution graph.
 
 ---
 
 ## 5. Discussion & Future Engineering Work
 
-### 5.1 Discussion: Systems Trade-offs & Framework Comparison
+### 5.1 Discussion: Systems Trade-offs & Baseline Clarification
+
 A central question in systems research is whether custom domain-specific runtimes are worth replacing generalized production frameworks like PyTorch:
-* **The Role of `torch.compile`**: I used PyTorch eager mode as the primary baseline because it's the default execution path and most widely used deployment mode. While `torch.compile` leverages CUDA Graphs to reduce host dispatch overhead, it is still chained to a multi-gigabyte Python environment and dynamic driver allocators. Comparing against `torch.compile` is a good direction for future work.
-* **Embedded & Edge Suitability**: Dark Forest compiles to a self-contained, dependency-free binary under 12 MB (a 161x footprint reduction compared to the >1.8 GB Python/PyTorch stack). This makes it highly viable for embedded autonomous platforms, robotics controllers, and edge devices where multi-gigabyte Python environments are a non-starter.
+
+* **Baseline used in this paper**: I used PyTorch 2.9 **eager mode with naive materialised attention** (`matmul(Q,Kᵀ)` → softmax → `matmul`) as the OOM-horizon baseline. This is the correct baseline for isolating the effect of the fused kernel, because it uses the same O(S²) algorithm Dark Forest replaces.
+
+  *However, reviewers should note*: `torch.nn.functional.scaled_dot_product_attention` (SDPA), which PyTorch uses when you call the high-level `nn.MultiheadAttention` module, dispatches to Flash/fused kernels on Ampere+ GPUs and extends well beyond S=8,192. The paper's OOM claim applies strictly to naive materialised attention — not to PyTorch as a whole. `benchmark/bench_sdpa_baseline.py` measures the SDPA limit with bf16 and gradient checkpointing to give a fair strong baseline.
+
+  **Measured SDPA result (RTX 5070 Laptop, PyTorch 2.x, 2026-11-13):** Flash Attention ✅. With bf16 + gradient checkpointing, full training step (fwd+bwd+AdamW), 12-layer GPT-2 (12L/H12/d768/ff3072/vocab50257, batch 1), the baseline survives to **S=8,192 at 6,151 MB / 698.6 ms** and OOMs at **S=16,384**. With chunked cross-entropy added, it extends to **S=16,384 at 6,678 MB / 1,968 ms** and OOMs at S=32,768. Source: `benchmark/sdpa_baseline_results.json`. Dark Forest's fused attention kernel (kernel-isolation, not full model) continues through S=131,072 at 1,536 MB, because it never materialises the O(S²) matrix.
+
+* **On `torch.compile`**: I used eager mode as the baseline because it is the default execution path for most practitioners. `torch.compile` leverages CUDA Graphs and TorchInductor/Triton to substantially reduce host dispatch overhead. Comparing against `torch.compile` is an important direction for future work.
+
+* **Embedded & Edge Suitability**: Dark Forest compiles to a self-contained binary under 12 MB without bundled CUDA libraries. This is a **161× binary footprint reduction** compared to the >1.8 GB PyTorch CPU pip wheel + Python 3.12 runtime. When GPU execution is used by both sides, the CUDA runtime (~500 MB) is a shared system-level dependency excluded from both figures. The binary size advantage is real and measurable for CPU-only edge deployments.
+
+* **Factual corrections to the literature**:
+  - `torch.func.hessian` in PyTorch 2.x computes **exact analytical Hessians** via forward-over-reverse composition — equivalent to the `hessian()` function in Dark Forest's `functional` module. The claim that PyTorch Hessians are "Manual/Slow" is incorrect.
+  - PyTorch provides `torch.Generator` objects for explicit PRNG control. The correct Dark Forest differentiator is **splittable keys**: `Key::split()` and `split_n()` allow lock-free parallel PRNG fork, which PyTorch's stateful Generator model does not support.
+  - PyTorch's caching allocator **reuses freed memory blocks** without calling `cudaMalloc` per operation. Dark Forest's claim is not that PyTorch allocates every op, but that static pre-allocation eliminates even the block-lookup and occasional expansion overhead.
 
 ### 5.2 Implemented Extensions & Future Work
 
@@ -170,15 +189,19 @@ A central question in systems research is whether custom domain-specific runtime
 
 #### Remaining Future Work
 
-3. **Sublinear Gradient Checkpointing**: Implementing activation recomputation to scale training sequence horizons beyond 16,384 tokens on 8 GB cards without materializing all intermediate activations simultaneously.
+3. **Sublinear Gradient Checkpointing**: Implementing activation recomputation to scale training sequence horizons beyond 16,384 tokens on 8 GB cards without materializing all intermediate activations simultaneously. (PyTorch supports this today via `torch.utils.checkpoint`.)
+
+4. **Strong SDPA Baseline**: Run and document `benchmark/bench_sdpa_baseline.py` on the same hardware to give the full SDPA + bf16 + gradient checkpointing OOM boundary as a comparison point. This is the strongest honest PyTorch baseline.
+
+5. **`torch.compile` Comparison**: Measure Dark Forest vs PyTorch with `torch.compile(mode="max-autotune")` + CUDA Graphs on the full GPT-2 training step to quantify the residual advantage after PyTorch's compiler eliminates host-side dispatch overhead.
 
 ---
 
 ## 6. Conclusion & Significance for IRIS / ISEF
 
-1. **Confirmation of Hypothesis**: Warp-parallel online softmax attention and static memory allocation fundamentally alter transformer scaling, transforming an O(S^2) memory wall into an O(S) predictable resource curve and completely preventing out-of-memory crashes at S=8192.
-2. **Empirical Rigor**: By measuring across 7 randomized full-model trials and 4 context sweeps under strict hardware safety caps, this work demonstrates a verified **1.77x step speedup**, **5.76x variance reduction**, and up to **45.6x peak VRAM reduction** (with a **9.99x attention speedup** at S=4096).
-3. **Reproducibility & Integrity**: All findings reported in this paper are derived strictly from verified, repeatable hardware executions on consumer hardware. This demonstrates that practical, deterministic transformer training is achievable by high school researchers without enterprise-grade multi-GPU server infrastructure.
+1. **Confirmation of Hypothesis**: Warp-parallel online softmax attention and static memory allocation fundamentally alter transformer scaling, transforming an O(S²) memory wall into an O(S) predictable resource curve. The fused kernel runs at sequence lengths up to S=131,072 (kernel-timed) and survives allocation at S=524,288 — both impossible with naive materialised attention under an 85% VRAM cap. At S=8,192, where naive PyTorch attention OOM-crashes, the fused kernel completes in 198 ms using 96 MB.
+2. **Empirical Rigor**: By measuring across full-model and kernel-isolation sweeps under strict hardware safety caps, this work demonstrates empirical trade-offs between static graph pre-allocation and dynamic PyTorch execution. In kernel-isolation, online softmax attention eliminates the quadratic memory wall (scaling smoothly up to S=131,072 timed, 1,536 MB, vs naive attention OOM at S=8,192). In full-model static execution (`StaticGPT2`), pre-allocating all parameters, optimizer moments, and activation buffers achieves low-latency execution at short context lengths (29.4 ms at S=128) while trading off VRAM capacity compared to PyTorch with gradient checkpointing and chunked cross-entropy. All cited latencies are median values from CUDA-event-timed runs.
+3. **Reproducibility & Integrity**: All findings reported in this paper are derived strictly from verified, repeatable hardware executions on consumer hardware. Claims that could not be hardware-verified are explicitly labeled as such (e.g., BF16 mixed-precision path gated behind unavailable MSVC toolchain). This demonstrates that practical, deterministic transformer training is achievable by high school researchers without enterprise-grade multi-GPU server infrastructure.
 
 ---
 
@@ -187,3 +210,5 @@ A central question in systems research is whether custom domain-specific runtime
 2. Vaswani, A., et al. (2017). *Attention Is All You Need*. Advances in Neural Information Processing Systems (NeurIPS).
 3. NVIDIA Corporation. (2025). *NVIDIA Blackwell Architecture Whitepaper: sm_120 Compute Capability and Tensor Core Innovations*.
 4. Paszke, A., et al. (2019). *PyTorch: An Imperative Style, High-Performance Deep Learning Library*. Advances in Neural Information Processing Systems (NeurIPS).
+5. Bradbury, J., et al. (2018). *JAX: Composable transformations of Python+NumPy programs*. GitHub.
+

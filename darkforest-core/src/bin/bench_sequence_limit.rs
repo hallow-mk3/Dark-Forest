@@ -1,5 +1,35 @@
 //! Benchmark sequence length scaling up to hardware OOM limit.
-//! Compares against PyTorch's OOM boundary at S=8192.
+//!
+//! # What this benchmark measures
+//!
+//! This is a **kernel-isolation** benchmark, not an end-to-end model run.
+//! It allocates only the Q, K, V, and Output tensors for the fused online-softmax
+//! attention kernel:
+//!   - Working set: 4 × S × d_model × sizeof(f32)
+//!   - At S = 2,097,152: 4 × 2,097,152 × 768 × 4 B = 24,576 MB (> 8 GB VRAM)
+//!
+//! # What is NOT measured
+//!
+//! - Model weights, biases, LayerNorm parameters
+//! - Backward-pass gradient buffers
+//! - Optimizer state (AdamW moments)
+//! - KV-cache (for a full GPT-2: 2 × 12 layers × S × 768 × 4 B = 72 GB fp32 at 2M tokens)
+//!
+//! # Kernel execution cutoff
+//!
+//! The fused attention kernel is only **timed** for S ≤ 131,072. For S > 131,072,
+//! only the CUDA allocation is attempted. If allocation succeeds, the row reports
+//! "Alloc verified, kernel not launched". The 2M row verifies graceful OOM handling —
+//! the kernel never runs at that sequence length in this benchmark.
+//!
+//! # PyTorch comparison baseline
+//!
+//! The "PyTorch OOM" boundary cited is for **naive materialised attention**
+//! (`matmul(Q,Kᵀ)` → softmax → `matmul`), which forces an S×S matrix into VRAM.
+//! `torch.nn.functional.scaled_dot_product_attention` (SDPA) uses Flash kernels
+//! and extends well past S=8,192. Run `benchmark/bench_sdpa_baseline.py` for the
+//! strong SDPA + bf16 + gradient-checkpointing baseline.
+
 
 use anyhow::Result;
 use darkforest_cuda::{cuda_sync, get_memory_info, kernels, CudaEventTimer, DeviceTensor};
@@ -32,17 +62,18 @@ fn main() -> Result<()> {
     println!("--------------------------------------------------------------------------------\n");
 
     let sequence_lengths: Vec<usize> = vec![
-        8_192,      // 8K   (PyTorch Naive OOM boundary)
-        16_384,     // 16K  (2x PyTorch OOM)
-        32_768,     // 32K  (4x PyTorch OOM)
-        65_536,     // 65K  (8x PyTorch OOM)
-        131_072,    // 131K (16x PyTorch OOM)
-        262_144,    // 262K (32x PyTorch OOM)
-        524_288,    // 524K (64x PyTorch OOM - Half Million Tokens)
-        1_048_576,  // 1M   (128x PyTorch OOM - 1 Million Tokens)
-        2_097_152,  // 2M   (256x PyTorch OOM)
+        8_192,      // 8K
+        16_384,     // 16K
+        32_768,     // 32K
+        65_536,     // 65K
+        131_072,    // 131K
+        262_144,    // 262K
+        524_288,    // 524K
+        1_048_576,  // 1M
+        2_097_152,  // 2M
     ];
 
+    #[derive(serde::Serialize)]
     struct BenchResult {
         seq_len: usize,
         latency_ms: Option<f64>,
@@ -139,6 +170,11 @@ fn main() -> Result<()> {
         }
 
         let run_kernel = s <= 131_072;
+        // NOTE: for S > 131,072, we only verify allocation — the kernel is not launched.
+        // This avoids prohibitively long runtimes (S=262K would take ~6+ hours at O(S²) CUDA ops).
+        // The working-set allocation itself (4 × S × d_model bytes) already exceeds 8 GB at S=2M,
+        // so the allocator will OOM before the kernel could run. Those rows report allocation
+        // success/failure only, not kernel execution.
         if run_kernel {
             for _ in 0..repeats {
                 let timer = CudaEventTimer::new();
@@ -253,6 +289,47 @@ fn main() -> Result<()> {
         );
     }
     println!("================================================================================\n");
+
+    #[derive(serde::Serialize)]
+    struct KernelMeta {
+        device: String,
+        total_vram_mb: f64,
+        free_vram_mb: f64,
+        heads: usize,
+        d_head: usize,
+        d_model: usize,
+        causal: bool,
+        precision: String,
+        scope: String,
+        description: String,
+    }
+
+    #[derive(serde::Serialize)]
+    struct KernelOutput {
+        metadata: KernelMeta,
+        results: Vec<BenchResult>,
+    }
+
+    let out = KernelOutput {
+        metadata: KernelMeta {
+            device: "NVIDIA GeForce RTX 5070 Laptop GPU".to_string(),
+            total_vram_mb: total_mb,
+            free_vram_mb: free_mb,
+            heads: n_heads,
+            d_head,
+            d_model,
+            causal,
+            precision: "Float32".to_string(),
+            scope: "kernel_isolation".to_string(),
+            description: "Fused online-softmax attention forward pass in isolation (Q, K, V, Out tensors only)".to_string(),
+        },
+        results,
+    };
+
+    if let Ok(json_str) = serde_json::to_string_pretty(&out) {
+        std::fs::write("benchmark/kernel_scaling_results.json", json_str).ok();
+        println!("Saved results to benchmark/kernel_scaling_results.json");
+    }
 
     Ok(())
 }

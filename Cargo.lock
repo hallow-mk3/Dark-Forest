@@ -124,7 +124,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "darkforest-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "darkforest-cuda",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "darkforest-cuda"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "log",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "darkforest-py"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "darkforest-core",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "models"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "darkforest-core",

@@ -1,12 +1,12 @@
 [package]
 name = "darkforest-core"
-version = "0.1.0"
-description = "Autograd and tensor runtime for GPU-first ML experiments"
+version = "1.0.0"
+description = "Deterministic Rust and CUDA machine learning runtime featuring pre-allocated static execution graphs and custom fused attention kernels."
 license = "MIT"
 authors = ["Dark Forest contributors"]
 repository = "https://github.com/your-org/darkforest"
-keywords = ["ml", "autograd", "tensor", "rust", "cuda"]
-categories = ["science", "machine-learning", "graphics"]
+keywords = ["machine-learning", "cuda", "rust", "deep-learning", "transformer"]
+categories = ["science", "machine-learning"]
 edition = "2021"
 
 [[bin]]

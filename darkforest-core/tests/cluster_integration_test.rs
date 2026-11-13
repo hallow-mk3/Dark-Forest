@@ -94,3 +94,4 @@ fn test_multi_node_ddp_training_step() {
         assert_eq!(averaged_grads, vec![2.5, 5.0, 7.5]);
     }
 }
+

@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "darkforest"
-version = "0.1.0"
-description = "Dark Forest: a Rust-first ML runtime with explicit device residency"
+version = "1.0.0"
+description = "Deterministic Rust and CUDA machine learning runtime featuring pre-allocated static execution graphs and custom fused attention kernels."
 readme = "../README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

@@ -1,221 +1,136 @@
-# Dark Forest — High-Performance Rust & CUDA ML Runtime
+# Dark Forest: A Rust and CUDA Machine Learning Runtime
 
-[![GitHub License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
-[![CUDA](https://img.shields.io/badge/CUDA-12.8%20%2F%2013.3-green.svg)](https://developer.nvidia.com/cuda-toolkit)
-[![Target](https://img.shields.io/badge/Target-Blackwell%20(sm__120)%20%26%20Ampere%2BAda-purple.svg)](https://www.nvidia.com/)
-
-**Dark Forest** is a lightweight, high-performance deep learning runtime I built from scratch in Rust and CUDA. My goal was to fix the memory issues and latency jitter that standard frameworks like PyTorch have on consumer hardware. It uses a fully static memory graph and custom fused CUDA kernels to train transformers without heavy python overhead.
+Dark Forest is a machine learning runtime written in Rust and CUDA. It implements pre-allocated static execution graphs and custom fused CUDA kernels to provide deterministic execution, low latency jitter, and minimal binary deployment footprints on consumer hardware.
 
 ---
 
-## ⚡ Verified Empirical Benchmarks: Dark Forest vs. PyTorch
+## Architecture Overview
 
-I ran all benchmarks directly on my local hardware: **NVIDIA GeForce RTX 5070 Laptop GPU (sm_120 Blackwell, 8 GB GDDR7)**. I put a strict 85 percent memory cap (6.77 GB) on both engines to ensure a fair test.
+1. **Pre-Allocated Static Execution (`StaticGPT2`)**:
+   Allocates model parameters, forward activation buffers, backward gradients, and AdamW optimizer moments in contiguous GPU memory at initialization. Eliminates per-step runtime `cudaMalloc` and `cudaFree` calls.
 
-### 1. Full GPT-2 Scale Step Latency & Execution Throughput
-### 1. Full GPT-2 Scale Step Latency
-*Configuration: 12 Layers, d_model=768, 12 Heads, d_ff=3072, Vocab 50,257, Context 128, Batch 1, Float32 precision, AdamW optimizer.*
+2. **Device-Resident Training Pipeline**:
+   Token indices are staged in device buffers, with the forward pass, cross-entropy loss, and backward pass executed on-device without CPU synchronization stalls. Step loss values are read asynchronously via pinned host memory.
 
-Dark Forest was tested using the `train_static` binary for 250 steps of training. The following metrics were extracted directly from the verified execution log (`training_loss_static.csv`):
-
-| Metric | Dark Forest (`train_static.exe`) |
-| :--- | :--- |
-| **Median Step Time** | **`35.391 ms`** |
-| **Minimum Step Time** | **`33.336 ms`** |
-| **Maximum Step Time** | **`43.585 ms`** |
-| **Loss Descent** | **`11.906` -> `2.679`** |
-
-*Note: PyTorch eager mode comparative execution traces were not fully recorded in this repository state. The metrics above represent the deterministic performance of the pre-allocated static graph workspace.*
+3. **Fused Attention Kernels**:
+   Implements a warp-parallel online-softmax attention forward kernel that evaluates scaled dot-product attention without materializing intermediate quadratic $O(S^2)$ attention matrices.
 
 ---
 
-### 2. Attention Sequence Scaling & Peak VRAM Reduction
-*Configuration: Batch Size 2, Heads 12, Head Dim 64, Float32, RTX 5070 Laptop GPU (85 percent VRAM cap = 6.77 GB).*
+## Empirical Benchmarks
 
-Across 4 independent sweeps, fused online softmax attention achieves up to a **9.99x kernel speedup** over naive attention while scaling memory linearly $O(S)$ instead of quadratically $O(S^2)$:
+All benchmarks were evaluated on local hardware: **NVIDIA GeForce RTX 5070 Laptop GPU** (8,123.44 MB total GDDR7 VRAM, Blackwell sm_120 architecture). A strict 85% per-process memory limit (6.74 GB / 6,904.9 MB) is enforced across tests to guarantee system stability.
 
-| Sequence Length (S) | Standard Attention Latency (Median) | Fused Online Softmax Latency (Median) | Speedup | Standard Peak VRAM | Fused Peak VRAM | Memory Savings |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **256** | `0.312 ms` | **`0.123 ms`** | **2.53x** | `30.88 MB` | **`14.12 MB`** | **2.19x** |
-| **512** | `0.899 ms` | **`0.234 ms`** | **3.84x** | `90.12 MB` | **`20.12 MB`** | **4.48x** |
-| **1024** | `8.060 ms` | **`0.872 ms`** | **9.24x** | `318.12 MB` | **`32.12 MB`** | **9.90x** |
-| **2048** | `33.958 ms` | **`4.232 ms`** | **8.02x** | `1,212.12 MB` | **`56.12 MB`** | **21.60x** |
-| **4096** | `158.528 ms` | **`15.875 ms`** | **9.99x** | `4,752.12 MB` | **`104.12 MB`** | **45.64x** |
-| **8192** | **OOM (Ran out of memory)** | **`66.962 ms`** | **Deterministic** | **OOM (>6.77 GB)** | **`200.12 MB`** | **Hardware Bounded** |
+### 1. Like-for-Like End-to-End Model Training Step
 
----
+*Configuration: 12 Layers, $d_{\text{model}}=768$, 12 Heads, $d_{\text{ff}}=3072$, Vocabulary 50,257, Batch Size 1, AdamW Optimizer ($lr=10^{-4}, \beta_1=0.9, \beta_2=0.999, \epsilon=10^{-8}, \text{weight\_decay}=0.01$).*
 
-### 3. Sequence Length OOM Horizon Benchmark (Up to 2,097,152 Tokens)
-*Hardware: NVIDIA RTX 5070 Laptop GPU (8 GB VRAM, Blackwell sm_120). Heads 12, Head Dim 64, $d_{\text{model}}=768$, Causal Masking.*
+*Scope: Full training step (Forward pass + Cross-Entropy loss + Backward pass + AdamW optimizer update).*
 
-While PyTorch's eager standard attention crashes with an unrecoverable OOM at **$S = 8,192$** (demanding $>6.77\text{ GB}$ just for the $S \times S$ attention matrix), Dark Forest's fused online-softmax kernel never materializes the quadratic attention matrix in global memory. We benchmarked Dark Forest's sequence horizon all the way to the physical GDDR7 limit:
+| Sequence Length ($S$) | PyTorch SDPA<br>(bf16 + ckpt)<br>[1] | PyTorch SDPA<br>(bf16 + ckpt + chunked CE)<br>[2] | Dark Forest Static Engine<br>(fp32 + TF32 MMA)<br>[3] | DF Peak VRAM |
+| :---: | :---: | :---: | :---: | :---: |
+| **128** | `54.8 ms` / `2,099 MB` | `55.9 ms` / `2,100 MB` | `38.84 ms` | `3,320 MB` |
+| **256** | `55.2 ms` / `2,109 MB` | `53.9 ms` / `2,112 MB` | — | — |
+| **512** | `56.1 ms` / `2,134 MB` | `60.3 ms` / `2,139 MB` | `112.62 ms` | `4,458 MB` |
+| **1,024** | `75.9 ms` / `2,179 MB` | `78.2 ms` / `2,185 MB` | `320.37 ms` | `6,862 MB` |
+| **2,048** | `125.7 ms` / `2,481 MB` | `122.4 ms` / `2,196 MB` | **OOM (>6.74 GB, 85% safety cap)** | `7,013 MB` |
+| **4,096** | `279.1 ms` / `3,706 MB` | `255.9 ms` / `2,836 MB` | **OOM** | — |
+| **8,192** | `698.6 ms` / `6,151 MB` | `668.3 ms` / `4,117 MB` | **OOM** | — |
+| **16,384** | **OOM (>6.74 GB, 85% safety cap)** | `1968.2 ms` / `6,678 MB` | **OOM** | — |
+| **32,768** | **OOM** | **OOM (>6.74 GB, 85% safety cap)** | **OOM** | — |
 
-| Sequence Length ($S$) | Multiple of PyTorch OOM | PyTorch Standard Attention | Dark Forest Fused Kernel | Activation VRAM | Status |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **8,192** (8K) | 1× | **OOM (>6.77 GB)** | **`198.2 ms`** | `96.00 MB` | **SURVIVED** (Online Softmax) |
-| **16,384** (16K) | 2× | **OOM** | **`709.5 ms`** | `192.00 MB` | **SURVIVED** (Online Softmax) |
-| **32,768** (32K) | 4× | **OOM** | **`2,820.3 ms`** | `384.00 MB` | **SURVIVED** (Online Softmax) |
-| **65,536** (65K) | 8× | **OOM** | **`14,791.8 ms`** | `768.00 MB` | **SURVIVED** (Online Softmax) |
-| **131,072** (131K) | 16× | **OOM** | **`96,720.7 ms`** | `1,536.00 MB` | **SURVIVED** (Online Softmax) |
-| **262,144** (262K) | 32× | **OOM** | *Linear Memory Scaling* | `3,072.00 MB` | **SURVIVED** (Alloc & Memory Verified) |
-| **524,288** (524K) | 64× | **OOM** | *Linear Memory Scaling* | `6,144.00 MB` | **SURVIVED** (Alloc & Memory Verified) |
-| **1,048,576** (1M) | 128× | **OOM** | *Physical VRAM Bounded* | `7,013.00 MB` | **SURVIVED** (Alloc & Memory Verified) |
-| **2,097,152** (2M) | 256× | **OOM** | *Physical VRAM Bounded* | `7,013.00 MB` | **SURVIVED** (Alloc & Memory Verified) |
-
-> **Key Architectural Horizon:** Dark Forest extends sequence capability **256× beyond PyTorch eager mode** on consumer 8 GB hardware by maintaining strict $O(S)$ working memory. Run this live via:
-> ```powershell
-> cargo run --release --bin bench_sequence_limit --features cuda
-> ```
+#### Measurement and Configuration Notes:
+- **[1] PyTorch SDPA (bf16 + ckpt)**: Uses `torch.nn.functional.scaled_dot_product_attention`, bfloat16 mixed precision, and gradient checkpointing. It materializes full logits for unchunked cross-entropy. At $S = 16{,}384$, logit allocation exceeds the 85% memory cap (6.74 GB).
+- **[2] PyTorch SDPA (+ chunked CE)**: Chunks the LM head projection and cross-entropy loss calculation (chunk size 1,024) to avoid materializing the $[S, 50257]$ logits tensor. Extends survival horizon to $S = 16{,}384$ before exceeding the 85% cap at $S = 32{,}768$.
+- **[3] Dark Forest Static Engine**: Operates in Float32 with hardware TF32 Tensor Core MMA enabled. It preallocates all layer activation buffers without gradient checkpointing, storing unchunked $[S, 50257]$ logits, probabilities, and gradient buffers. Memory scales statically with sequence length, reaching the 85% safety cap at $S = 2{,}048$.
+- **Parameter Count Accounting**:
+  - Dark Forest parameter counts: 162.35M ($S=128$), 162.64M ($S=512$), 163.04M ($S=1024$), 163.82M ($S=2048$). Dark Forest allocates position embeddings sized exactly to the active context window.
+  - PyTorch benchmark parameter count: 212.50M ($212{,}500{,}224$ parameters). The PyTorch benchmark initialized learned position embeddings for `max_pos = 65,537` ($50.3\text{M}$ parameters) to support the full scaling sweep without reinitialization.
 
 ---
 
-## 📦 Systems Packaging & Deployment Footprint
+### 2. Attention Kernel Horizon Benchmark (Kernel Isolation)
 
-Separate from raw speed, Dark Forest frees deep learning from heavy Python environments. This is a massive deal for edge computing and robotics.
+*Scope: Evaluates the fused online-softmax attention forward kernel in isolation. Allocates only $Q, K, V$, and $\text{Output}$ tensors ($4 \times S \times d_{\text{model}} \times \text{sizeof(float32)}$). Does not include model parameters, optimizer state, backward passes, or full-model activations.*
 
-| Deployment Attribute | Standard PyTorch + Python Stack | Dark Forest Native Binary | Systems Difference |
-| :--- | :--- | :--- | :--- |
-| **Disk Footprint** | `>1,800 MB` (Python + `torch` + dependencies) | **`<12 MB` (Standalone binary)** | **161x smaller disk footprint** |
-| **Host Runtime** | Python interpreter, CPython GIL, Conda env | **Zero-dependency compiled native machine code** | Completely self-contained |
-| **Edge Feasibility** | Heavy memory footprint on micro-robotics | **Drop-in executable for constrained edge systems** | Direct native execution |
+*Configuration: $B = 1, H = 12, d_{\text{head}} = 64, d_{\text{model}} = 768$, Causal Masking, Float32.*
 
----
+| Sequence Length ($S$) | Measured Latency (Median) | Working-Set VRAM | Measured Compute Throughput | Execution Status |
+| :---: | :---: | :---: | :---: | :--- |
+| **8,192** | `190.7 ms` | `96 MB` | 0.5 TFLOP/s | Kernel executed |
+| **16,384** | `756.9 ms` | `192 MB` | 0.5 TFLOP/s | Kernel executed |
+| **32,768** | `3,782.6 ms` | `384 MB` | 0.4 TFLOP/s | Kernel executed |
+| **65,536** | `23,711.1 ms` | `768 MB` | 0.3 TFLOP/s | Kernel executed |
+| **131,072** | `108,989.4 ms` | `1,536 MB` | 0.2 TFLOP/s | Kernel executed |
+| **262,144** | *Not timed* | `3,072 MB` | — | Allocation verified only |
+| **524,288** | *Not timed* | `6,144 MB` | — | Allocation verified only |
+| **1,048,576** | *Not timed* | `7,013 MB` | — | Capped at free device VRAM |
+| **2,097,152** | *Not timed* | `7,013 MB` | — | Exceeds 8 GB capacity ($24.6\text{ GB}$ required) |
 
-## 🛠️ Core Architectural Contributions
-
-* **Static Graph Scheduling (`StaticGPT2`)**: I designed the engine to pre-allocate all forward activations, backward gradients, and AdamW optimizer moments in contiguous device memory up front. This completely eliminates dynamic `cudaMalloc`/`cudaFree` driver calls during training.
-* **Device-Resident Training Loop**:
-  * Token and target indices are uploaded to pre-allocated device buffers (`d_input_indices`, `d_target_indices`).
-  * The entire forward pass, cross-entropy loss, and backward pass are dispatched as GPU kernels without any CPU blocking.
-  * I use a `PinnedBuffer` to download the loss asynchronously, so the CPU doesn't stall waiting for the GPU to finish the step.
-* **Fused CUDA Kernels (`sm_120`)**:
-  * I wrote a warp-parallel online softmax attention kernel to avoid creating the massive O(S^2) intermediate attention matrix.
-  * Fused LayerNorm with in-warp mean and variance reductions.
-  * Tiled GEMM with double-buffered shared memory and float4 vectorized memory loads.
-* **KV-Cache Fast Inference (`generate_fast`)**:
-  * Pre-allocated KV-caches (`[seq_len, d_model]`) for O(1) single-token decode steps.
-  * Custom GEMV (matrix-vector) kernel replaces GEMM for decode, eliminating unnecessary compute.
-  * GPU-side argmax reduction keeps token selection on device — only a 4-byte scalar crosses PCIe per step.
-  * End-to-end generation eliminates O(S²) full-context recomputation, yielding deterministic sub-millisecond decode steps.
-* **Parameter-Efficient Fine-Tuning (`StaticLoRAGPT2` — LoRA / QLoRA)**:
-  * Freezes all base weights; only trains low-rank adapter matrices A and B (< 1% of parameters).
-  * Optional 4-bit NormalFloat (NF4) quantization for base weights (QLoRA) — 7.11x VRAM compression.
-  * Direct weight merging ($W' = W_{\text{base}} + \frac{\alpha}{r} B A$) for zero-overhead, adapter-free native deployment.
-  * Compact LoRA-only checkpointing with binary adapter serialization (`save_lora_checkpoint` / `load_lora_checkpoint`).
-* **Unified Engine Interface (`Engine` & `EngineConfig`)**:
-  * Unified abstraction over base `StaticGPT2` and `StaticLoRAGPT2`.
-  * Pre-configured presets: `EngineConfig::gpt2_124m()`, `EngineConfig::small()`, and `EngineConfig::micro()`.
-  * Real-time token streaming (`generate_stream`) returning rich generation reports with latency and reason codes.
-  * Context-aware sampling supporting temperature, top-k, top-p (nucleus), repetition penalties, and configurable stop tokens.
-  * Seamless CPU fallback execution path ensuring 100% test and execution parity without CUDA hardware.
-* **Next-Generation Foundational Systems**:
-  * **Distributed Cluster Coordination & Collective Primitives (`darkforest_core::cluster`)**: Slurm and Torchrun environment variable auto-detection (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`). Bandwidth-optimal Ring All-Reduce ($2 \frac{W-1}{W} N$ transfer), Broadcast, All-Gather, and Reduce-Scatter across in-memory channel hubs and physical cross-node TCP network sockets. Distributed Data Parallel (`DistributedDataParallel`) orchestrating multi-node gradient averaging and parameter synchronization.
-  * **Cryptographic Weight Provenance & ZK-Auditing (`darkforest_core::provenance`)**: Generates immutable SHA-256 Merkle audit chains for each training and fine-tuning step. Emits verifiable non-poisoning proofs checking gradient norm bounds, loss continuity, and training data lineage without revealing proprietary weights.
-  * **Holographic Context Compaction & Manifold Caching (`darkforest_core::engine::holographic`)**: Solves the linear $O(S)$ KV-cache explosion. Continuously binds historical context into an $O(1)$ constant-memory continuous associative manifold matrix ($M_t = \lambda M_{t-1} + k^T v$) with associative recall ($v = q \cdot M$). Memory consumption remains strictly constant across arbitrary sequence lengths.
-  * **Semantic-Native Type Systems & Differentiable Interfaces (`darkforest_core::semantic_type`)**: Replaces rigid discrete schemas with continuous manifold types in latent embedding spaces ($\mathcal{M} = \{ x \in \mathbb{R}^D \mid \text{dist}(x, \mathbf{c}) \le \tau \}$). Type checking is differentiable—emitting continuous loss penalties that allow models to backpropagate directly through semantic type violations.
-* **Functional Transformations & Scientific Computing Engine (`darkforest_core::functional`)**:
-  * **NumPy-like Array API (`jnp`, `Array`)**: Pure immutable arrays with referential transparency. Leverages Rust's zero-cost Copy-on-Write (COW) semantics to execute in-place hardware updates when unshared, with indexed functional updates (`arr.at(idx).set/add/mul/min/max(...)`).
-  * **Just-In-Time Compilation & Operator Fusion (`jit`)**: Computes expression intermediate representations (`IrGraph`), eliminates dead code (DCE), fuses elementwise chains into fused kernels (e.g. Fused Multiply-Add), and caches pre-allocated plans.
-  * **Automatic Differentiation Suite (`diff`)**: Forward-mode autodiff (`jvp`) using dual numbers, reverse-mode autodiff (`vjp`) via pullback closures, exact analytical gradients (`grad`, `value_and_grad`), full Jacobians, and exact analytical Hessians (`hessian`).
-  * **Automatic Vectorization (`vmap`)**: Automatically vectorizes single-sample functions across batch dimensions with Rayon multi-threaded parallelism without manual loops or reshaping.
-  * **Parallel Device Sharding (`sharding`, `pmap`)**: Maps computations across multi-threaded or multi-device meshes with collective reductions (`p_sum`, `p_mean`, `p_gather`).
-  * **Explicit PRNG Key Tracking (`random`)**: Stateless 128-bit `Key` system with `split()`, `split_n()`, and `fold_in()` for perfectly reproducible, lock-free parallel random sampling.
-  * **NaN/Inf Trapping & Telemetry (`debug`)**: Immediate zero-overhead diagnostic traps (`debug_check_nans`) reporting min/max/mean/NaN-percentage, pipeline-transparent inspection (`debug_print`), and microsecond profiling (`ProfileTrace`).
-  * **Optax-style Functional Optimizers (`optax`)**: Pure functional state transformations (`init`, `update`, `apply_updates`) for AdamW with global norm clipping and decoupled weight decay.
+*For derivation of theoretical working-set sizes, KV-cache requirements at 2M tokens, and OOM boundaries, refer to [docs/LONG_CONTEXT_DERIVATION.md](file:///c:/Users/swast/Entropy/Dark-Forest/docs/LONG_CONTEXT_DERIVATION.md).*
 
 ---
 
-## 🔍 Feature Verification & Audit Status Table
+## Systems Packaging and Footprint
 
-I made sure every claim in this project is explicitly tested and verified. Here is the status of the core components:
+Application binary footprints are compared like-for-like (excluding shared external GPU driver and CUDA toolkit runtime libraries):
 
-| Component / Subsystem | Verification Status | Implementation & Proof Artifact |
-| :--- | :---: | :--- |
-| **Static Engine 12-Layer Training** | **VERIFIED ON HARDWARE** | [`train_static.rs`](darkforest-core/src/bin/train_static.rs), [`training_loss_static.csv`](training_loss_static.csv) |
-| **Finite-Difference Gradient Checks** | **VERIFIED ON HARDWARE** | 17/17 passed via [`cargo run --bin grad_check`](darkforest-core/src/bin/grad_check.rs) |
-| **Workspace & Distributed Tests** | **VERIFIED ON HARDWARE** | 109/109 passed via `cargo test` (86 core + 9 CUDA + 5 nn autograd + 6 functional + 3 cluster integration) |
-| **Cluster Distributed Training (DDP & Ring All-Reduce)** | **VERIFIED ON HARDWARE** | Slurm/Torchrun env autodetection, 8-node Ring All-Reduce, 4-node DDP gradient averaging in `tests/cluster_integration_test.rs` |
-| **Cryptographic Provenance & ZK-Audit Ledger** | **VERIFIED ON HARDWARE** | Merkle hash chain, non-poisoning gradient verification, tampering detection in `src/provenance.rs` |
-| **Holographic Context Compaction ($O(1)$ Memory)** | **VERIFIED ON HARDWARE** | Continuous associative memory manifold verified with constant memory across 1,200 tokens in `src/engine/holographic.rs` |
-| **Semantic-Native Types & Differentiable Interfaces** | **VERIFIED ON HARDWARE** | Continuous latent manifold contracts, analytical penalty gradients guiding embeddings in `src/semantic_type.rs` |
-| **Functional Transformations (JAX-grade)** | **VERIFIED ON HARDWARE** | `jnp`, immutable `.at[...]`, `grad`, `vjp`, `jvp`, `hessian`, `vmap`, `jit` fusion, `pmap`, `random::Key`, `optax` |
-| **Topological Autograd & Diamond Graph Accumulation** | **VERIFIED ON HARDWARE** | Resolved exponential DAG bug & partial gradient overwriting; verified in `tests/autograd_nn_test.rs` |
-| **Connected Dynamic `nn` Layers** | **VERIFIED ON HARDWARE** | Linear, Attention, Conv1d/2d, BatchNorm, MaxPool2d full backward flow verified |
-| **Online Softmax Memory & Latency** | **VERIFIED ON HARDWARE** | Verified S=64..2,097,152; OOM Horizon benchmarked in `src/bin/bench_sequence_limit.rs` |
-| **PyTorch Eager Baseline Parity** | **VERIFIED ON HARDWARE** | 7 repeated trials logged via [`benchmark/bench_exact_same_config.py`](benchmark/bench_exact_same_config.py) |
-| **KV-Cache Autoregressive Decoding (`generate_fast`)** | **VERIFIED ON HARDWARE** | GPU KV-cache decode, GEMV kernels, device-argmax in `static_gpt2.rs`; benchmarked via `--generate-compare` flag |
-| **NF4 Weight Dequantization (QLoRA)** | **VERIFIED ON HARDWARE** | Proved in `benchmark/empirical_proof_data.json` (7.11x compression, MSE 0.0085) |
-| **LoRA / QLoRA PEFT Fine-Tuning** | **VERIFIED ON HARDWARE** | `StaticLoRAGPT2` with low-rank adapters, 4-bit NF4 base weights, LoRA-only checkpointing |
-| **Zero-Overhead Weight Merging** | **VERIFIED IMPLEMENTATION** | Mathematical merge $W \mathrel{+}= \frac{\alpha}{r}BA$ in [`lora.rs`](darkforest-core/src/engine/lora.rs), `--merge-lora` in [`train_static.rs`](darkforest-core/src/bin/train_static.rs) |
-| **Native Standalone Engine CLI** | **VERIFIED IMPLEMENTATION** | Native CLI with generate, streaming chat, and architecture telemetry in [`darkforest_cli.rs`](darkforest-core/src/bin/darkforest_cli.rs) |
-| **Python Engine Bindings** | **VERIFIED IMPLEMENTATION** | `darkforest.Engine`, `darkforest.EngineConfig`, `darkforest.cli` via PyO3 in [`darkforest-py`](darkforest-py/src/lib.rs) |
-| **Multi-GPU / Cluster Distributed Training** | **VERIFIED IMPLEMENTATION** | Multi-node Ring All-Reduce, DDP gradient synchronizer, and TCP/Channel transports in `src/cluster/` |
+| Deployment Attribute | Standard PyTorch + Python Stack | Dark Forest Native Binary | Technical Distinction |
+| :--- | :---: | :---: | :--- |
+| **Binary / Package Footprint** | `>1,800 MB` (CPU wheel + Python runtime) | **`<12 MB`** (standalone stripped binary) | Self-contained compiled binary |
+| **Runtime Dependencies** | Python 3 interpreter, CPython runtime, DLLs | **None** (system C/CUDA runtime only) | Direct machine code execution |
+| **Cold-Start Startup Time** | Several seconds (interpreter startup + imports) | **<100 ms** (native binary load) | No module parsing or JIT warmup |
+| **CPU-Only Deployment** | Requires Python virtual environment and torch wheel | Single native executable | Runs on headless embedded/robotics hardware |
 
 ---
 
-## 🚀 Quickstart & One-Command Full Verification
+## Reproducibility
 
-### 1. Run Complete Automated Verification Suite
-Executes all 9 verification suites (Rust workspace, autograd checks, GPU sanity, attention numerical parity, loss convergence, KV-cache fast generation, LoRA fine-tuning, weight merging, and native CLI):
-```powershell
-python verify_all.py
-```
+Every metric reported in this repository is reproducible on hardware using committed benchmark scripts and verifiable JSON result files.
 
-### 2. Standalone Dark Forest Engine CLI (`darkforest_cli`)
-Run generation, inspect architecture, or launch interactive streaming chat directly:
-```powershell
-# Inspect engine architecture & memory layout
-cargo run --release --bin darkforest_cli -- info --config gpt2
+### Hardware and Software Environment
 
-# Fast KV-cache token generation with repetition penalty & streaming
-cargo run --release --bin darkforest_cli -- generate --config small --tokens 64 --temp 0.8 --top-p 0.9 --rep-penalty 1.15 --stream
+- **GPU**: NVIDIA GeForce RTX 5070 Laptop GPU (8,123.44 MB Total GDDR7, sm_120 Blackwell)
+- **Host OS**: Microsoft Windows 11
+- **Driver Version**: NVIDIA Display Driver 617.42
+- **CUDA Toolkit**: 13.4 (NVCC 13.4.59)
+- **PyTorch Version**: 2.11.0+cu128
+- **Rust Toolchain**: rustc / cargo 1.99.1
+- **Python**: 3.12.10
+- **Measurement Date**: November 12–13, 2026
 
-# Interactive token-streaming chat
-cargo run --release --bin darkforest_cli -- chat --config micro --temp 0.7
-```
+### Reproduction Commands
 
-### 3. Run Dark Forest Static Training Engine (250 Steps)
-```powershell
-cargo run --release --bin train_static --features cuda -- --steps 250 --ctx-len 128 --d-model 768 --n-layers 12 --n-heads 12 --d-ff 3072 --vocab-size 50257
-```
+1. **Run PyTorch SDPA Baseline Sweeps**:
+   ```powershell
+   python benchmark/bench_sdpa_baseline.py
+   ```
+   *Output saved to:* `benchmark/sdpa_baseline_results.json`
 
-### 4. Run Autoregressive Inference (KV-Cache Fast Decode)
-Benchmarks `generate_fast` (O(S) KV-cache decode) vs. naive full-context recompute side-by-side:
-```powershell
-cargo run --release --bin train_static --features cuda -- --steps 50 --ctx-len 128 --d-model 768 --n-layers 12 --n-heads 12 --d-ff 3072 --generate-compare 64
-```
+2. **Run Dark Forest End-to-End Model Training Benchmark**:
+   ```powershell
+   python benchmark/bench_darkforest_e2e.py
+   ```
+   *Output saved to:* `benchmark/darkforest_e2e_results.json`
 
-### 5. Run LoRA Fine-Tuning & Zero-Overhead Weight Merging
-```powershell
-# Standard LoRA (rank 8, alpha 16)
-cargo run --release --bin train_static --features cuda -- --steps 100 --ctx-len 128 --d-model 768 --n-layers 12 --n-heads 12 --d-ff 3072 --lora --lora-rank 8 --lora-alpha 16
+3. **Run Attention Kernel Scaling Benchmark (Kernel Isolation)**:
+   ```powershell
+   cargo run --release --bin bench_sequence_limit --features cuda
+   ```
+   *Output saved to:* `benchmark/kernel_scaling_results.json`
 
-# Zero-Overhead Deployment: Train LoRA and immediately merge into base weights
-cargo run --release --bin train_static --features cuda -- --steps 50 --lora --merge-lora --generate 32
-```
+4. **Run Full Benchmark Suite**:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File benchmark/run_all.ps1
+   ```
 
-### 6. Python Engine Interface
-Dark Forest provides high-level zero-copy Python bindings:
-```python
-import darkforest as df
-
-# Create complete engine with preset configuration
-config = df.EngineConfig.gpt2_124m()
-engine = df.Engine(config)
-
-# Autoregressive generation with KV caching and sampling controls
-tokens = engine.generate_fast(
-    prompt_tokens=[15, 42, 99],
-    max_tokens=64,
-    temperature=0.8,
-    top_p=0.9,
-    repetition_penalty=1.15,
-)
-print("Generated:", tokens)
-```
+5. **Verify README Numbers Against Committed JSON Data**:
+   ```powershell
+   python scripts/test_readme_tables.py
+   ```
 
 ---
 
-## 📜 License
-Released under the [MIT License](LICENSE).
+## License
+
+This project is released under the [MIT License](file:///c:/Users/swast/Entropy/Dark-Forest/LICENSE).

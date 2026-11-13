@@ -63,9 +63,9 @@ pub fn cuda_scale(x: *const f32, out: *mut f32, alpha: f32, n: usize) -> Result<
     #[cfg(darkforest_cuda_kernels)]
     unsafe {
         extern "C" {
-            fn launch_scale(x: *const f32, out: *mut f32, alpha: f32, n: u32);
+            fn launch_scale(x: *const f32, alpha: f32, out: *mut f32, n: u32);
         }
-        launch_scale(x, out, alpha, n as u32);
+        launch_scale(x, alpha, out, n as u32);
         return Ok(());
     }
     #[cfg(not(darkforest_cuda_kernels))]

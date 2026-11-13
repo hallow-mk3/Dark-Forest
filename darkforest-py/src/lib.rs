@@ -281,6 +281,9 @@ impl PyStaticGPT2 {
             temperature,
             top_k,
             top_p,
+            repetition_penalty: 1.0,
+            stop_tokens: Vec::new(),
+            min_tokens: 0,
         };
         self.inner
             .generate(&prompt_tokens, max_new_tokens, &cfg)
@@ -301,6 +304,9 @@ impl PyStaticGPT2 {
             temperature,
             top_k,
             top_p,
+            repetition_penalty: 1.0,
+            stop_tokens: Vec::new(),
+            min_tokens: 0,
         };
         self.inner
             .generate_fast(&prompt_tokens, max_new_tokens, &cfg)
@@ -541,6 +547,9 @@ impl PyStaticLoRAGPT2 {
             temperature,
             top_k,
             top_p,
+            repetition_penalty: 1.0,
+            stop_tokens: Vec::new(),
+            min_tokens: 0,
         };
         self.inner
             .generate(&prompt_tokens, max_new_tokens, &cfg)
@@ -561,6 +570,9 @@ impl PyStaticLoRAGPT2 {
             temperature,
             top_k,
             top_p,
+            repetition_penalty: 1.0,
+            stop_tokens: Vec::new(),
+            min_tokens: 0,
         };
         self.inner
             .generate_fast(&prompt_tokens, max_new_tokens, &cfg)
