@@ -1947,7 +1947,7 @@ impl AttentionContext {
         let mut guard = self.probabilities.lock().map_err(|e| anyhow!("{e}"))?;
         if guard.is_none() {
             let allocator = Arc::new(memory::GpuAllocator);
-            let workspace_bytes = 2 * self.seq_len * self.seq_len * std::mem::size_of::<f32>();
+            let workspace_bytes = self.n_heads * 2 * self.seq_len * self.seq_len * std::mem::size_of::<f32>();
             *guard = Some(memory::CudaBuffer::new(workspace_bytes, allocator)?);
         }
         Ok(guard)

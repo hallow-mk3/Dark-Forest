@@ -1,196 +1,199 @@
-// attention_fused.cu — Dark Forest: Hand-fused Scaled Dot-Product Attention (FlashAttention-style)
-// Target: sm_120 (Blackwell architecture, RTX 5070)
+// attention_fused.cu — Dark Forest: Hand-fused Scaled Dot-Product Attention
+// (FlashAttention-style) Target: sm_120 (Blackwell architecture, RTX 5070)
 //
-// Fuses Q*K^T, scaling, online causal softmax, and V-reduction into a single tiled kernel
-// avoiding materialization of the full (seq_len x seq_len) attention matrix in HBM.
-// Supports both single-head and multi-head attention (MHA).
+// Fuses Q*K^T, scaling, online causal softmax, and V-reduction into a single
+// tiled kernel avoiding materialization of the full (seq_len x seq_len)
+// attention matrix in HBM. Supports both single-head and multi-head attention
+// (MHA).
 
 #include <cuda_runtime.h>
 #include <float.h>
 #include <stdint.h>
 
-#define TILE_M   32
-#define TILE_N   32
+#define TILE_M 32
+#define TILE_N 32
 #define MAX_DHEAD 128
 
 // Cooperative reduction across a 32-thread warp
 __inline__ __device__ float warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
+#pragma unroll
+  for (int offset = 16; offset > 0; offset /= 2) {
+    val += __shfl_down_sync(0xffffffff, val, offset);
+  }
+  return val;
 }
 
 __inline__ __device__ float warp_reduce_max(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
-    }
-    return val;
+#pragma unroll
+  for (int offset = 16; offset > 0; offset /= 2) {
+    val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
+  }
+  return val;
 }
 
 // ---------------------------------------------------------------------------
 // Multi-Head Attention (MHA) Forward Pass — Cooperative Warp Tiled
 // Block Dim: (32 lanes across d, 4 query rows) = 128 threads/block
-// Eliminates sequential loop over d inside each thread and enables vectorized loads.
+// Eliminates sequential loop over d inside each thread and enables vectorized
+// loads.
 // ---------------------------------------------------------------------------
 __global__ void kernel_fused_mha_fwd_tiled(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    float* __restrict__ Out,
-    uint32_t n_heads,
-    uint32_t seq_len,
-    uint32_t d_head,
-    float scale,
-    uint32_t is_causal
-) {
-    uint32_t h = blockIdx.y;
-    uint32_t tid_d = threadIdx.x; // [0..31]
-    uint32_t tid_q = threadIdx.y; // [0..3]
-    uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
+    const float *__restrict__ Q, const float *__restrict__ K,
+    const float *__restrict__ V, float *__restrict__ Out, uint32_t n_heads,
+    uint32_t seq_len, uint32_t d_head, float scale, uint32_t is_causal) {
+  uint32_t h = blockIdx.y;
+  uint32_t tid_d = threadIdx.x; // [0..31]
+  uint32_t tid_q = threadIdx.y; // [0..3]
+  uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
 
-    if (h >= n_heads || q_idx >= seq_len) return;
+  if (h >= n_heads || q_idx >= seq_len)
+    return;
 
-    // Guard: each warp lane accumulates MAX_DHEAD/blockDim.x = 128/32 = 4 slots.
-    // Enforce at runtime so misconfigured callers fail loudly instead of silently.
-    if (d_head > MAX_DHEAD) {
-        __trap(); // visible as cudaErrorIllegalInstruction at the next sync
+  // Guard: each warp lane accumulates MAX_DHEAD/blockDim.x = 128/32 = 4 slots.
+  // Enforce at runtime so misconfigured callers fail loudly instead of
+  // silently.
+  if (d_head > MAX_DHEAD) {
+    __trap(); // visible as cudaErrorIllegalInstruction at the next sync
+  }
+
+  uint32_t d_model = n_heads * d_head;
+  uint32_t head_offset = h * d_head;
+
+  float m_i = -FLT_MAX;
+  float l_i = 0.0f;
+  uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
+  const float *q_ptr = Q + (size_t)q_idx * d_model + head_offset;
+
+  // Preload Q values into registers to avoid reloading Q in every step of the
+  // key loop
+  float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+       d += blockDim.x, ++lane) {
+    q_val[lane] = __ldg(&q_ptr[d]);
+  }
+
+  // o_acc: MAX_DHEAD/blockDim.x = 128/32 = 4 register slots per lane
+  float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+  for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+    const float *k_ptr = K + (size_t)k_idx * d_model + head_offset;
+    const float *v_ptr = V + (size_t)k_idx * d_model + head_offset;
+
+    // Compute Q . K across arbitrary d_head using cached Q in registers
+    float partial_dot = 0.0f;
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+         d += blockDim.x, ++lane) {
+      partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
     }
+    float dot_val = warp_reduce_sum(partial_dot);
+    dot_val = __shfl_sync(0xffffffff, dot_val,
+                          0); // Broadcast full dot product to all lanes
+    float score = dot_val * scale;
 
-    uint32_t d_model = n_heads * d_head;
-    uint32_t head_offset = h * d_head;
+    float m_prev = m_i;
+    float m_new = fmaxf(m_prev, score);
+    float alpha = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
+    float p = __expf(score - m_new);
 
-    float m_i = -FLT_MAX;
-    float l_i = 0.0f;
-    uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
-    const float* q_ptr = Q + (size_t)q_idx * d_model + head_offset;
+    l_i = fmaf(l_i, alpha, p);
+    m_i = m_new;
 
-    // Preload Q values into registers to avoid reloading Q in every step of the key loop
-    float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-        q_val[lane] = __ldg(&q_ptr[d]);
+    // Accumulate V values across d using hardware FMA
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+         d += blockDim.x, ++lane) {
+      o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
     }
+  }
 
-    // o_acc: MAX_DHEAD/blockDim.x = 128/32 = 4 register slots per lane
-    float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
-    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        const float* k_ptr = K + (size_t)k_idx * d_model + head_offset;
-        const float* v_ptr = V + (size_t)k_idx * d_model + head_offset;
-
-        // Compute Q . K across arbitrary d_head using cached Q in registers
-        float partial_dot = 0.0f;
-        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-            partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
-        }
-        float dot_val = warp_reduce_sum(partial_dot);
-        dot_val = __shfl_sync(0xffffffff, dot_val, 0); // Broadcast full dot product to all lanes
-        float score = dot_val * scale;
-
-        float m_prev = m_i;
-        float m_new  = fmaxf(m_prev, score);
-        float alpha  = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
-        float p      = __expf(score - m_new);
-
-        l_i = fmaf(l_i, alpha, p);
-        m_i = m_new;
-
-        // Accumulate V values across d using hardware FMA
-        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-            o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
-        }
-    }
-
-    float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
-    float* out_ptr = Out + (size_t)q_idx * d_model + head_offset;
-    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-        out_ptr[d] = o_acc[lane] * inv_l;
-    }
+  float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
+  float *out_ptr = Out + (size_t)q_idx * d_model + head_offset;
+  for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+       d += blockDim.x, ++lane) {
+    out_ptr[d] = o_acc[lane] * inv_l;
+  }
 }
 
 __global__ void kernel_fused_attention_fwd_tiled(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    float* __restrict__ Out,
-    uint32_t seq_len,
-    uint32_t d_head,
-    float scale,
-    uint32_t is_causal
-) {
-    uint32_t tid_d = threadIdx.x; // [0..31]
-    uint32_t tid_q = threadIdx.y; // [0..3]
-    uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
+    const float *__restrict__ Q, const float *__restrict__ K,
+    const float *__restrict__ V, float *__restrict__ Out, uint32_t seq_len,
+    uint32_t d_head, float scale, uint32_t is_causal) {
+  uint32_t tid_d = threadIdx.x; // [0..31]
+  uint32_t tid_q = threadIdx.y; // [0..3]
+  uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
 
-    if (q_idx >= seq_len) return;
+  if (q_idx >= seq_len)
+    return;
 
-    float m_i = -FLT_MAX;
-    float l_i = 0.0f;
-    uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
-    const float* q_ptr = Q + (size_t)q_idx * d_head;
+  float m_i = -FLT_MAX;
+  float l_i = 0.0f;
+  uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
+  const float *q_ptr = Q + (size_t)q_idx * d_head;
 
-    // Preload Q values into registers to avoid reloading Q in every step of key loop
-    float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-        q_val[lane] = __ldg(&q_ptr[d]);
+  // Preload Q values into registers to avoid reloading Q in every step of key
+  // loop
+  float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+       d += blockDim.x, ++lane) {
+    q_val[lane] = __ldg(&q_ptr[d]);
+  }
+
+  float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+  for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+    const float *k_ptr = K + (size_t)k_idx * d_head;
+    const float *v_ptr = V + (size_t)k_idx * d_head;
+
+    float partial_dot = 0.0f;
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+         d += blockDim.x, ++lane) {
+      partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
     }
+    float dot_val = warp_reduce_sum(partial_dot);
+    dot_val = __shfl_sync(0xffffffff, dot_val,
+                          0); // Broadcast full dot product to all lanes
+    float score = dot_val * scale;
 
-    float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float m_prev = m_i;
+    float m_new = fmaxf(m_prev, score);
+    float alpha = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
+    float p = __expf(score - m_new);
 
-    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        const float* k_ptr = K + (size_t)k_idx * d_head;
-        const float* v_ptr = V + (size_t)k_idx * d_head;
+    l_i = fmaf(l_i, alpha, p);
+    m_i = m_new;
 
-        float partial_dot = 0.0f;
-        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-            partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
-        }
-        float dot_val = warp_reduce_sum(partial_dot);
-        dot_val = __shfl_sync(0xffffffff, dot_val, 0); // Broadcast full dot product to all lanes
-        float score = dot_val * scale;
-
-        float m_prev = m_i;
-        float m_new  = fmaxf(m_prev, score);
-        float alpha  = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
-        float p      = __expf(score - m_new);
-
-        l_i = fmaf(l_i, alpha, p);
-        m_i = m_new;
-
-        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-            o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
-        }
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+         d += blockDim.x, ++lane) {
+      o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
     }
+  }
 
-    float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
-    float* out_ptr = Out + (size_t)q_idx * d_head;
-    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-        out_ptr[d] = o_acc[lane] * inv_l;
-    }
+  float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
+  float *out_ptr = Out + (size_t)q_idx * d_head;
+  for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+       d += blockDim.x, ++lane) {
+    out_ptr[d] = o_acc[lane] * inv_l;
+  }
 }
 
-extern "C" void launch_fused_attention(
-    const float* q, const float* k, const float* v,
-    float* out,
-    uint32_t seq_len, uint32_t d_head,
-    float scale, uint32_t causal
-) {
-    dim3 block_dim(32, 4);
-    dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y);
-    kernel_fused_attention_fwd_tiled<<<grid_dim, block_dim>>>(q, k, v, out, seq_len, d_head, scale, causal);
+extern "C" void launch_fused_attention(const float *q, const float *k,
+                                       const float *v, float *out,
+                                       uint32_t seq_len, uint32_t d_head,
+                                       float scale, uint32_t causal) {
+  dim3 block_dim(32, 4);
+  dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y);
+  kernel_fused_attention_fwd_tiled<<<grid_dim, block_dim>>>(
+      q, k, v, out, seq_len, d_head, scale, causal);
 }
 
-extern "C" void launch_fused_mha_forward(
-    const float* q, const float* k, const float* v,
-    float* out,
-    uint32_t n_heads, uint32_t seq_len, uint32_t d_head,
-    float scale, uint32_t causal
-) {
-    dim3 block_dim(32, 4); // 32 lanes in d dimension, 4 query rows
-    dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y, n_heads);
-    kernel_fused_mha_fwd_tiled<<<grid_dim, block_dim>>>(q, k, v, out, n_heads, seq_len, d_head, scale, causal);
+extern "C" void launch_fused_mha_forward(const float *q, const float *k,
+                                         const float *v, float *out,
+                                         uint32_t n_heads, uint32_t seq_len,
+                                         uint32_t d_head, float scale,
+                                         uint32_t causal) {
+  dim3 block_dim(32, 4); // 32 lanes in d dimension, 4 query rows
+  dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y, n_heads);
+  kernel_fused_mha_fwd_tiled<<<grid_dim, block_dim>>>(
+      q, k, v, out, n_heads, seq_len, d_head, scale, causal);
 }
 
 // ---------------------------------------------------------------------------
@@ -207,138 +210,139 @@ extern "C" void launch_fused_mha_forward(
 // Each block processes THREADS_Q query tokens in parallel.
 // ---------------------------------------------------------------------------
 __global__ void kernel_attention_bwd_tiled(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    const float* __restrict__ dOut,
-    float* __restrict__ dQ,
-    float* __restrict__ dK,
-    float* __restrict__ dV,
-    float* __restrict__ probabilities,  // scratch [seq_len, seq_len]
-    uint32_t seq_len,
-    uint32_t d_head,
-    float scale,
-    uint32_t is_causal
-) {
-    uint32_t tid_d = threadIdx.x; // [0 .. blockDim.x - 1], typically 32 (warp lane)
-    uint32_t tid_q = threadIdx.y; // [0 .. blockDim.y - 1], typically 4
-    uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
+    const float *__restrict__ Q, const float *__restrict__ K,
+    const float *__restrict__ V, const float *__restrict__ dOut,
+    float *__restrict__ dQ, float *__restrict__ dK, float *__restrict__ dV,
+    float *__restrict__ probabilities, // scratch [seq_len, seq_len]
+    uint32_t seq_len, uint32_t d_head, float scale, uint32_t is_causal) {
+  uint32_t tid_d =
+      threadIdx.x; // [0 .. blockDim.x - 1], typically 32 (warp lane)
+  uint32_t tid_q = threadIdx.y; // [0 .. blockDim.y - 1], typically 4
+  uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
 
-    if (q_idx >= seq_len) return;
+  if (q_idx >= seq_len)
+    return;
 
-    uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
-    float* prob_row = probabilities + (size_t)q_idx * seq_len;
-    const float* q_row = Q + (size_t)q_idx * d_head;
-    const float* dout_row = dOut + (size_t)q_idx * d_head;
+  uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
+  float *prob_row = probabilities + (size_t)q_idx * seq_len;
+  const float *q_row = Q + (size_t)q_idx * d_head;
+  const float *dout_row = dOut + (size_t)q_idx * d_head;
 
-    // --- Step 1: Softmax Scores computation (parallel across d within warp) ---
-    float local_row_max = -FLT_MAX;
-    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        const float* k_row = K + (size_t)k_idx * d_head;
-        float dot_val = 0.0f;
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            dot_val += __ldg(&q_row[d]) * __ldg(&k_row[d]);
-        }
-        dot_val = warp_reduce_sum(dot_val);
-
-        if (tid_d == 0) {
-            float score = dot_val * scale;
-            prob_row[k_idx] = score;
-            local_row_max = fmaxf(local_row_max, score);
-        }
-    }
-    __syncwarp();
-
-    // Broadcast row_max across the warp
-    float row_max = __shfl_sync(0xffffffff, local_row_max, 0);
-
-    // --- Step 2: Softmax normalizer (P_ij = exp(S_ij - max) / sum) ---
-    float local_sum = 0.0f;
-    for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
-        float p = __expf(prob_row[k_idx] - row_max);
-        prob_row[k_idx] = p;
-        local_sum += p;
-    }
-    local_sum = warp_reduce_sum(local_sum);
-    float sum_exp = __shfl_sync(0xffffffff, local_sum, 0);
-    float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
-
-    for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
-        prob_row[k_idx] *= inv_sum;
-    }
-    __syncwarp();
-
-    // --- Step 3: Compute d_prob_sum = sum_k ( P_ik * (dOut_i . V_k) ) ---
-    float local_d_prob_sum = 0.0f;
-    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        const float* v_row = V + (size_t)k_idx * d_head;
-        float dp_val = 0.0f;
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            dp_val += __ldg(&dout_row[d]) * __ldg(&v_row[d]);
-        }
-        dp_val = warp_reduce_sum(dp_val);
-        if (tid_d == 0) {
-            local_d_prob_sum += dp_val * prob_row[k_idx];
-        }
-    }
-    float d_prob_sum = __shfl_sync(0xffffffff, local_d_prob_sum, 0);
-
-    // --- Step 4: Compute dQ and accumulate dK, dV ---
-    // Zero out dQ for this thread's d-lanes
+  // --- Step 1: Softmax Scores computation (parallel across d within warp) ---
+  float local_row_max = -FLT_MAX;
+  for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+    const float *k_row = K + (size_t)k_idx * d_head;
+    float dot_val = 0.0f;
     for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-        dQ[(size_t)q_idx * d_head + d] = 0.0f;
+      dot_val += __ldg(&q_row[d]) * __ldg(&k_row[d]);
     }
+    dot_val = warp_reduce_sum(dot_val);
 
-    // Outer loop over keys k_idx so the full dot(dOut_i, V_k) is computed cooperatively once
-    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        const float* v_row = V + (size_t)k_idx * d_head;
-        const float* k_row = K + (size_t)k_idx * d_head;
-
-        // Compute full dp = dot(dOut_i, V_k) across all d
-        float partial_dp = 0.0f;
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            partial_dp += __ldg(&dout_row[d]) * __ldg(&v_row[d]);
-        }
-        float dp = warp_reduce_sum(partial_dp);
-        dp = __shfl_sync(0xffffffff, dp, 0);
-
-        float p_val   = prob_row[k_idx];
-        float d_score = p_val * (dp - d_prob_sum);
-
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            float q_d    = __ldg(&q_row[d]);
-            float dout_d = __ldg(&dout_row[d]);
-            dQ[(size_t)q_idx * d_head + d] += scale * d_score * __ldg(&k_row[d]);
-            atomicAdd(&dK[(size_t)k_idx * d_head + d], scale * d_score * q_d);
-            atomicAdd(&dV[(size_t)k_idx * d_head + d], p_val * dout_d);
-        }
+    if (tid_d == 0) {
+      float score = dot_val * scale;
+      prob_row[k_idx] = score;
+      local_row_max = fmaxf(local_row_max, score);
     }
+  }
+  __syncwarp();
+
+  // Broadcast row_max across the warp
+  float row_max = __shfl_sync(0xffffffff, local_row_max, 0);
+
+  // --- Step 2: Softmax normalizer (P_ij = exp(S_ij - max) / sum) ---
+  float local_sum = 0.0f;
+  for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
+    float p = __expf(prob_row[k_idx] - row_max);
+    prob_row[k_idx] = p;
+    local_sum += p;
+  }
+  local_sum = warp_reduce_sum(local_sum);
+  float sum_exp = __shfl_sync(0xffffffff, local_sum, 0);
+  float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+
+  for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
+    prob_row[k_idx] *= inv_sum;
+  }
+  __syncwarp();
+
+  // --- Step 3: Compute d_prob_sum = sum_k ( P_ik * (dOut_i . V_k) ) ---
+  float local_d_prob_sum = 0.0f;
+  for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+    const float *v_row = V + (size_t)k_idx * d_head;
+    float dp_val = 0.0f;
+    for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
+      dp_val += __ldg(&dout_row[d]) * __ldg(&v_row[d]);
+    }
+    dp_val = warp_reduce_sum(dp_val);
+    if (tid_d == 0) {
+      local_d_prob_sum += dp_val * prob_row[k_idx];
+    }
+  }
+  float d_prob_sum = __shfl_sync(0xffffffff, local_d_prob_sum, 0);
+
+  // --- Step 4: Compute dQ and accumulate dK, dV ---
+  // Zero out dQ for this thread's d-lanes
+  for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
+    dQ[(size_t)q_idx * d_head + d] = 0.0f;
+  }
+
+  // Outer loop over keys k_idx so the full dot(dOut_i, V_k) is computed
+  // cooperatively once
+  for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+    const float *v_row = V + (size_t)k_idx * d_head;
+    const float *k_row = K + (size_t)k_idx * d_head;
+
+    // Compute full dp = dot(dOut_i, V_k) across all d
+    float partial_dp = 0.0f;
+    for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
+      partial_dp += __ldg(&dout_row[d]) * __ldg(&v_row[d]);
+    }
+    float dp = warp_reduce_sum(partial_dp);
+    dp = __shfl_sync(0xffffffff, dp, 0);
+
+    float p_val = prob_row[k_idx];
+    float d_score = p_val * (dp - d_prob_sum);
+
+    for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
+      float q_d = __ldg(&q_row[d]);
+      float dout_d = __ldg(&dout_row[d]);
+      dQ[(size_t)q_idx * d_head + d] += scale * d_score * __ldg(&k_row[d]);
+      atomicAdd(&dK[(size_t)k_idx * d_head + d], scale * d_score * q_d);
+      atomicAdd(&dV[(size_t)k_idx * d_head + d], p_val * dout_d);
+    }
+  }
 }
 
-extern "C" void launch_attention_backward(
-    const float* q, const float* k, const float* v, const float* d_out,
-    float* d_q, float* d_k, float* d_v, float* probabilities,
-    uint32_t seq_len, uint32_t d_head, float scale, uint32_t causal
-) {
-    size_t gradient_bytes = (size_t)seq_len * d_head * sizeof(float);
-    cudaMemsetAsync(d_k, 0, gradient_bytes);
-    cudaMemsetAsync(d_v, 0, gradient_bytes);
+extern "C" void launch_attention_backward(const float *q, const float *k,
+                                          const float *v, const float *d_out,
+                                          float *d_q, float *d_k, float *d_v,
+                                          float *probabilities,
+                                          uint32_t seq_len, uint32_t d_head,
+                                          float scale, uint32_t causal) {
+  size_t gradient_bytes = (size_t)seq_len * d_head * sizeof(float);
+  cudaMemsetAsync(d_k, 0, gradient_bytes);
+  cudaMemsetAsync(d_v, 0, gradient_bytes);
 
-    dim3 block_dim(32, 4); // 32 lanes (d dimension) x 4 query rows = 128 threads/block
-    dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y);
+  dim3 block_dim(
+      32, 4); // 32 lanes (d dimension) x 4 query rows = 128 threads/block
+  dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y);
 
-    kernel_attention_bwd_tiled<<<grid_dim, block_dim>>>(
-        q, k, v, d_out, d_q, d_k, d_v, probabilities,
-        seq_len, d_head, scale, causal
-    );
+  kernel_attention_bwd_tiled<<<grid_dim, block_dim>>>(
+      q, k, v, d_out, d_q, d_k, d_v, probabilities, seq_len, d_head, scale,
+      causal);
 }
 
 // ---------------------------------------------------------------------------
 // Multi-Head Attention (MHA) Tiled Backward Pass (Per-Head Streamlined)
 // Evaluates one head at a time, reusing the [seq_len x seq_len] probability
-// scratch buffer across heads, cutting VRAM by 12x (from 768 MB to 64 MB at S=4096).
+// scratch buffer across heads, cutting VRAM by 12x (from 768 MB to 64 MB at
+// S=4096).
 // ---------------------------------------------------------------------------
-__global__ void kernel_mha_bwd_single_head(
+// Multi-Head Attention (MHA) Backward Pass — All Heads Parallel
+// Grid: ( (seq_len + 3) / 4, n_heads )
+// Block: (32, 4) — 128 threads per block
+// ---------------------------------------------------------------------------
+__global__ void kernel_mha_bwd_all_heads(
     const float* __restrict__ Q,
     const float* __restrict__ K,
     const float* __restrict__ V,
@@ -347,146 +351,147 @@ __global__ void kernel_mha_bwd_single_head(
     float* __restrict__ dK,
     float* __restrict__ dV,
     float* __restrict__ probabilities,
-    uint32_t head_idx,
     uint32_t n_heads,
     uint32_t seq_len,
     uint32_t d_head,
     float scale,
     uint32_t is_causal
 ) {
-    uint32_t h = head_idx;
+    uint32_t h = blockIdx.y;
     uint32_t tid_d = threadIdx.x; // [0..31]
     uint32_t tid_q = threadIdx.y; // [0..3]
     uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
 
-    if (q_idx >= seq_len) return;
+    if (h >= n_heads || q_idx >= seq_len) return;
 
     uint32_t d_model = n_heads * d_head;
     uint32_t head_offset = h * d_head;
-    float* prob_row    = probabilities + (size_t)q_idx * seq_len;
-    float* d_score_row = probabilities + (size_t)seq_len * seq_len + (size_t)q_idx * seq_len;
+    size_t head_prob_offset = (size_t)h * 2 * seq_len * seq_len;
+    float* prob_row    = probabilities + head_prob_offset + (size_t)q_idx * seq_len;
+    float* d_score_row = probabilities + head_prob_offset + (size_t)seq_len * seq_len + (size_t)q_idx * seq_len;
 
-    uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
+  uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
 
-    const float* q_row = Q + (size_t)q_idx * d_model + head_offset;
-    const float* dout_row = dOut + (size_t)q_idx * d_model + head_offset;
+  const float *q_row = Q + (size_t)q_idx * d_model + head_offset;
+  const float *dout_row = dOut + (size_t)q_idx * d_model + head_offset;
 
-    // Load query and output gradient into registers once for this token
-    float q_0 = (tid_d < d_head) ? __ldg(&q_row[tid_d]) : 0.0f;
-    float q_1 = (tid_d + 32 < d_head) ? __ldg(&q_row[tid_d + 32]) : 0.0f;
-    float dout_0 = (tid_d < d_head) ? __ldg(&dout_row[tid_d]) : 0.0f;
-    float dout_1 = (tid_d + 32 < d_head) ? __ldg(&dout_row[tid_d + 32]) : 0.0f;
+  // Load query and output gradient into registers once for this token
+  float q_0 = (tid_d < d_head) ? __ldg(&q_row[tid_d]) : 0.0f;
+  float q_1 = (tid_d + 32 < d_head) ? __ldg(&q_row[tid_d + 32]) : 0.0f;
+  float dout_0 = (tid_d < d_head) ? __ldg(&dout_row[tid_d]) : 0.0f;
+  float dout_1 = (tid_d + 32 < d_head) ? __ldg(&dout_row[tid_d + 32]) : 0.0f;
 
-    // --- Step 1: Softmax Scores (Warp reduction over d_head) ---
-    float local_row_max = -FLT_MAX;
-    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        const float* k_row = K + (size_t)k_idx * d_model + head_offset;
-        float dot_val = q_0 * __ldg(&k_row[tid_d]);
-        if (tid_d + 32 < d_head) {
-            dot_val += q_1 * __ldg(&k_row[tid_d + 32]);
-        }
-        dot_val = warp_reduce_sum(dot_val);
-
-        if (tid_d == 0) {
-            float score = dot_val * scale;
-            prob_row[k_idx] = score;
-            local_row_max = fmaxf(local_row_max, score);
-        }
+  // --- Step 1: Softmax Scores (Warp reduction over d_head) ---
+  float local_row_max = -FLT_MAX;
+  for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+    const float *k_row = K + (size_t)k_idx * d_model + head_offset;
+    float dot_val = q_0 * __ldg(&k_row[tid_d]);
+    if (tid_d + 32 < d_head) {
+      dot_val += q_1 * __ldg(&k_row[tid_d + 32]);
     }
-    __syncwarp();
+    dot_val = warp_reduce_sum(dot_val);
 
-    float row_max = __shfl_sync(0xffffffff, local_row_max, 0);
-
-    // --- Step 2: Softmax Normalization ---
-    float local_sum = 0.0f;
-    for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
-        float p = __expf(prob_row[k_idx] - row_max);
-        prob_row[k_idx] = p;
-        local_sum += p;
+    if (tid_d == 0) {
+      float score = dot_val * scale;
+      prob_row[k_idx] = score;
+      local_row_max = fmaxf(local_row_max, score);
     }
-    local_sum = warp_reduce_sum(local_sum);
-    float sum_exp = __shfl_sync(0xffffffff, local_sum, 0);
-    float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+  }
+  __syncwarp();
 
-    for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
-        prob_row[k_idx] *= inv_sum;
+  float row_max = __shfl_sync(0xffffffff, local_row_max, 0);
+
+  // --- Step 2: Softmax Normalization ---
+  float local_sum = 0.0f;
+  for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
+    float p = __expf(prob_row[k_idx] - row_max);
+    prob_row[k_idx] = p;
+    local_sum += p;
+  }
+  local_sum = warp_reduce_sum(local_sum);
+  float sum_exp = __shfl_sync(0xffffffff, local_sum, 0);
+  float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+
+  for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
+    prob_row[k_idx] *= inv_sum;
+  }
+  __syncwarp();
+
+  // --- Step 3: Compute d_prob_sum and d_score_row in a single pass ---
+  float local_d_prob_sum = 0.0f;
+  for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+    const float *v_row = V + (size_t)k_idx * d_model + head_offset;
+    float dp_val = dout_0 * __ldg(&v_row[tid_d]);
+    if (tid_d + 32 < d_head) {
+      dp_val += dout_1 * __ldg(&v_row[tid_d + 32]);
     }
-    __syncwarp();
-
-    // --- Step 3: Compute d_prob_sum and d_score_row in a single pass ---
-    float local_d_prob_sum = 0.0f;
-    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        const float* v_row = V + (size_t)k_idx * d_model + head_offset;
-        float dp_val = dout_0 * __ldg(&v_row[tid_d]);
-        if (tid_d + 32 < d_head) {
-            dp_val += dout_1 * __ldg(&v_row[tid_d + 32]);
-        }
-        dp_val = warp_reduce_sum(dp_val);
-        if (tid_d == 0) {
-            d_score_row[k_idx] = dp_val; // temporarily hold dp
-            local_d_prob_sum += dp_val * prob_row[k_idx];
-        }
+    dp_val = warp_reduce_sum(dp_val);
+    if (tid_d == 0) {
+      d_score_row[k_idx] = dp_val; // temporarily hold dp
+      local_d_prob_sum += dp_val * prob_row[k_idx];
     }
-    float d_prob_sum = __shfl_sync(0xffffffff, local_d_prob_sum, 0);
+  }
+  float d_prob_sum = __shfl_sync(0xffffffff, local_d_prob_sum, 0);
 
-    for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
-        d_score_row[k_idx] = prob_row[k_idx] * (d_score_row[k_idx] - d_prob_sum);
-    }
-    __syncwarp();
+  for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
+    d_score_row[k_idx] = prob_row[k_idx] * (d_score_row[k_idx] - d_prob_sum);
+  }
+  __syncwarp();
 
-    // --- Step 4: Compute dQ (accumulated in registers) and accumulate dK, dV ---
-    float acc_dq_0 = 0.0f;
-    float acc_dq_1 = 0.0f;
+  // --- Step 4: Compute dQ (accumulated in registers) and accumulate dK, dV ---
+  float acc_dq_0 = 0.0f;
+  float acc_dq_1 = 0.0f;
 
-    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        float p_val   = prob_row[k_idx];
-        float d_score = d_score_row[k_idx];
+  for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+    float p_val = prob_row[k_idx];
+    float d_score = d_score_row[k_idx];
 
-        const float* k_row = K + (size_t)k_idx * d_model + head_offset;
+    const float *k_row = K + (size_t)k_idx * d_model + head_offset;
 
-        float k_0 = (tid_d < d_head) ? __ldg(&k_row[tid_d]) : 0.0f;
-        float k_1 = (tid_d + 32 < d_head) ? __ldg(&k_row[tid_d + 32]) : 0.0f;
+    float k_0 = (tid_d < d_head) ? __ldg(&k_row[tid_d]) : 0.0f;
+    float k_1 = (tid_d + 32 < d_head) ? __ldg(&k_row[tid_d + 32]) : 0.0f;
 
-        acc_dq_0 += scale * d_score * k_0;
-        acc_dq_1 += scale * d_score * k_1;
+    acc_dq_0 += scale * d_score * k_0;
+    acc_dq_1 += scale * d_score * k_1;
 
-        if (tid_d < d_head) {
-            atomicAdd(&dK[(size_t)k_idx * d_model + head_offset + tid_d], scale * d_score * q_0);
-            atomicAdd(&dV[(size_t)k_idx * d_model + head_offset + tid_d], p_val * dout_0);
-        }
-        if (tid_d + 32 < d_head) {
-            atomicAdd(&dK[(size_t)k_idx * d_model + head_offset + tid_d + 32], scale * d_score * q_1);
-            atomicAdd(&dV[(size_t)k_idx * d_model + head_offset + tid_d + 32], p_val * dout_1);
-        }
-    }
-
-    // Write dQ once from registers to global device memory
     if (tid_d < d_head) {
-        dQ[(size_t)q_idx * d_model + head_offset + tid_d] = acc_dq_0;
+      atomicAdd(&dK[(size_t)k_idx * d_model + head_offset + tid_d],
+                scale * d_score * q_0);
+      atomicAdd(&dV[(size_t)k_idx * d_model + head_offset + tid_d],
+                p_val * dout_0);
     }
     if (tid_d + 32 < d_head) {
-        dQ[(size_t)q_idx * d_model + head_offset + tid_d + 32] = acc_dq_1;
+      atomicAdd(&dK[(size_t)k_idx * d_model + head_offset + tid_d + 32],
+                scale * d_score * q_1);
+      atomicAdd(&dV[(size_t)k_idx * d_model + head_offset + tid_d + 32],
+                p_val * dout_1);
     }
+  }
+
+  // Write dQ once from registers to global device memory
+  if (tid_d < d_head) {
+    dQ[(size_t)q_idx * d_model + head_offset + tid_d] = acc_dq_0;
+  }
+  if (tid_d + 32 < d_head) {
+    dQ[(size_t)q_idx * d_model + head_offset + tid_d + 32] = acc_dq_1;
+  }
 }
 
 extern "C" void launch_fused_mha_backward(
-    const float* q, const float* k, const float* v, const float* d_out,
-    float* d_q, float* d_k, float* d_v, float* probabilities,
-    uint32_t n_heads, uint32_t seq_len, uint32_t d_head, float scale, uint32_t causal
-) {
-    size_t gradient_bytes = (size_t)seq_len * n_heads * d_head * sizeof(float);
-    cudaMemsetAsync(d_k, 0, gradient_bytes);
-    cudaMemsetAsync(d_v, 0, gradient_bytes);
+    const float *q, const float *k, const float *v, const float *d_out,
+    float *d_q, float *d_k, float *d_v, float *probabilities, uint32_t n_heads,
+    uint32_t seq_len, uint32_t d_head, float scale, uint32_t causal) {
+  size_t gradient_bytes = (size_t)seq_len * n_heads * d_head * sizeof(float);
+  cudaMemsetAsync(d_k, 0, gradient_bytes);
+  cudaMemsetAsync(d_v, 0, gradient_bytes);
 
     dim3 block_dim(32, 4); // 32 lanes for d dimension, 4 query tokens per block
-    dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y, 1);
+    dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y, n_heads);
 
-    for (uint32_t h = 0; h < n_heads; ++h) {
-        kernel_mha_bwd_single_head<<<grid_dim, block_dim>>>(
-            q, k, v, d_out, d_q, d_k, d_v, probabilities,
-            h, n_heads, seq_len, d_head, scale, causal
-        );
-    }
+    kernel_mha_bwd_all_heads<<<grid_dim, block_dim>>>(
+        q, k, v, d_out, d_q, d_k, d_v, probabilities,
+        n_heads, seq_len, d_head, scale, causal
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -498,95 +503,87 @@ extern "C" void launch_fused_mha_backward(
 //
 // Memory Layout:
 //   Q:       [1, d_model] contiguous (head h is at Q + h * d_head)
-//   K_cache: [max_seq_len, d_model] contiguous (token t, head h is at K_cache + t * d_model + h * d_head)
-//   V_cache: [max_seq_len, d_model] contiguous (token t, head h is at V_cache + t * d_model + h * d_head)
-//   Out:     [1, d_model] contiguous (head h is at Out + h * d_head)
+//   K_cache: [max_seq_len, d_model] contiguous (token t, head h is at K_cache +
+//   t * d_model + h * d_head) V_cache: [max_seq_len, d_model] contiguous (token
+//   t, head h is at V_cache + t * d_model + h * d_head) Out:     [1, d_model]
+//   contiguous (head h is at Out + h * d_head)
 //
 // Grid: (n_heads, 1) — exactly one block (warp) per attention head.
 // Block: (32, 1) — 32 threads cooperatively process head dimension d_head.
 // ---------------------------------------------------------------------------
 __global__ void kernel_fused_mha_decode_kv(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_cache,
-    const float* __restrict__ V_cache,
-    float* __restrict__ Out,
-    uint32_t n_heads,
-    uint32_t cur_seq_len,
-    uint32_t d_head,
-    float scale
-) {
-    uint32_t h = blockIdx.x;
-    uint32_t tid_d = threadIdx.x; // [0..31]
-    if (h >= n_heads || cur_seq_len == 0) return;
+    const float *__restrict__ Q, const float *__restrict__ K_cache,
+    const float *__restrict__ V_cache, float *__restrict__ Out,
+    uint32_t n_heads, uint32_t cur_seq_len, uint32_t d_head, float scale) {
+  uint32_t h = blockIdx.x;
+  uint32_t tid_d = threadIdx.x; // [0..31]
+  if (h >= n_heads || cur_seq_len == 0)
+    return;
 
-    uint32_t d_model = n_heads * d_head;
-    uint32_t head_offset = h * d_head;
-    const float* q_ptr = Q + head_offset;
+  uint32_t d_model = n_heads * d_head;
+  uint32_t head_offset = h * d_head;
+  const float *q_ptr = Q + head_offset;
 
-    // Preload Q values into registers once for the entire autoregressive decode step
-    float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-        q_val[lane] = __ldg(&q_ptr[d]);
+  // Preload Q values into registers once for the entire autoregressive decode
+  // step
+  float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+       d += blockDim.x, ++lane) {
+    q_val[lane] = __ldg(&q_ptr[d]);
+  }
+
+  // Online softmax state
+  float m_i = -FLT_MAX;
+  float l_i = 0.0f;
+
+  // Up to 4 register slots per thread for d_head <= 128
+  float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+  for (uint32_t t = 0; t < cur_seq_len; ++t) {
+    const float *k_ptr = K_cache + (size_t)t * d_model + head_offset;
+    const float *v_ptr = V_cache + (size_t)t * d_model + head_offset;
+
+    // Compute Q . K_t across d_head using cached Q
+    float partial_dot = 0.0f;
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+         d += blockDim.x, ++lane) {
+      partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
     }
+    float dot_val = warp_reduce_sum(partial_dot);
+    dot_val = __shfl_sync(0xffffffff, dot_val, 0); // broadcast to all 32 lanes
+    float score = dot_val * scale;
 
-    // Online softmax state
-    float m_i = -FLT_MAX;
-    float l_i = 0.0f;
+    // Online softmax update
+    float m_prev = m_i;
+    float m_new = fmaxf(m_prev, score);
+    float alpha = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
+    float p = __expf(score - m_new);
 
-    // Up to 4 register slots per thread for d_head <= 128
-    float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    l_i = fmaf(l_i, alpha, p);
+    m_i = m_new;
 
-    for (uint32_t t = 0; t < cur_seq_len; ++t) {
-        const float* k_ptr = K_cache + (size_t)t * d_model + head_offset;
-        const float* v_ptr = V_cache + (size_t)t * d_model + head_offset;
-
-        // Compute Q . K_t across d_head using cached Q
-        float partial_dot = 0.0f;
-        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-            partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
-        }
-        float dot_val = warp_reduce_sum(partial_dot);
-        dot_val = __shfl_sync(0xffffffff, dot_val, 0); // broadcast to all 32 lanes
-        float score = dot_val * scale;
-
-        // Online softmax update
-        float m_prev = m_i;
-        float m_new  = fmaxf(m_prev, score);
-        float alpha  = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
-        float p      = __expf(score - m_new);
-
-        l_i = fmaf(l_i, alpha, p);
-        m_i = m_new;
-
-        // Accumulate V_t with hardware FMA
-        for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-            o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
-        }
+    // Accumulate V_t with hardware FMA
+    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+         d += blockDim.x, ++lane) {
+      o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
     }
+  }
 
-    float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
-    float* out_ptr = Out + head_offset;
-    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4; d += blockDim.x, ++lane) {
-        out_ptr[d] = o_acc[lane] * inv_l;
-    }
+  float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
+  float *out_ptr = Out + head_offset;
+  for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
+       d += blockDim.x, ++lane) {
+    out_ptr[d] = o_acc[lane] * inv_l;
+  }
 }
 
-extern "C" void launch_fused_mha_decode_kv(
-    const float* q,
-    const float* k_cache,
-    const float* v_cache,
-    float* out,
-    uint32_t n_heads,
-    uint32_t cur_seq_len,
-    uint32_t d_head,
-    float scale
-) {
-    dim3 block_dim(32, 1);
-    dim3 grid_dim(n_heads, 1);
-    kernel_fused_mha_decode_kv<<<grid_dim, block_dim>>>(
-        q, k_cache, v_cache, out, n_heads, cur_seq_len, d_head, scale
-    );
+extern "C" void launch_fused_mha_decode_kv(const float *q, const float *k_cache,
+                                           const float *v_cache, float *out,
+                                           uint32_t n_heads,
+                                           uint32_t cur_seq_len,
+                                           uint32_t d_head, float scale) {
+  dim3 block_dim(32, 1);
+  dim3 grid_dim(n_heads, 1);
+  kernel_fused_mha_decode_kv<<<grid_dim, block_dim>>>(
+      q, k_cache, v_cache, out, n_heads, cur_seq_len, d_head, scale);
 }
-
-
-
