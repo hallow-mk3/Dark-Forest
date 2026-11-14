@@ -363,20 +363,27 @@ __global__ void kernel_mha_bwd_single_head(
 
     uint32_t d_model = n_heads * d_head;
     uint32_t head_offset = h * d_head;
-    float* prob_row  = probabilities + (size_t)q_idx * seq_len;
+    float* prob_row    = probabilities + (size_t)q_idx * seq_len;
+    float* d_score_row = probabilities + (size_t)seq_len * seq_len + (size_t)q_idx * seq_len;
 
     uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
 
     const float* q_row = Q + (size_t)q_idx * d_model + head_offset;
     const float* dout_row = dOut + (size_t)q_idx * d_model + head_offset;
 
+    // Load query and output gradient into registers once for this token
+    float q_0 = (tid_d < d_head) ? __ldg(&q_row[tid_d]) : 0.0f;
+    float q_1 = (tid_d + 32 < d_head) ? __ldg(&q_row[tid_d + 32]) : 0.0f;
+    float dout_0 = (tid_d < d_head) ? __ldg(&dout_row[tid_d]) : 0.0f;
+    float dout_1 = (tid_d + 32 < d_head) ? __ldg(&dout_row[tid_d + 32]) : 0.0f;
+
     // --- Step 1: Softmax Scores (Warp reduction over d_head) ---
     float local_row_max = -FLT_MAX;
     for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
         const float* k_row = K + (size_t)k_idx * d_model + head_offset;
-        float dot_val = 0.0f;
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            dot_val += __ldg(&q_row[d]) * __ldg(&k_row[d]);
+        float dot_val = q_0 * __ldg(&k_row[tid_d]);
+        if (tid_d + 32 < d_head) {
+            dot_val += q_1 * __ldg(&k_row[tid_d + 32]);
         }
         dot_val = warp_reduce_sum(dot_val);
 
@@ -406,48 +413,59 @@ __global__ void kernel_mha_bwd_single_head(
     }
     __syncwarp();
 
-    // --- Step 3: Compute d_prob_sum = sum_k ( P_ik * (dOut_i . V_k) ) ---
+    // --- Step 3: Compute d_prob_sum and d_score_row in a single pass ---
     float local_d_prob_sum = 0.0f;
     for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
         const float* v_row = V + (size_t)k_idx * d_model + head_offset;
-        float dp_val = 0.0f;
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            dp_val += __ldg(&dout_row[d]) * __ldg(&v_row[d]);
+        float dp_val = dout_0 * __ldg(&v_row[tid_d]);
+        if (tid_d + 32 < d_head) {
+            dp_val += dout_1 * __ldg(&v_row[tid_d + 32]);
         }
         dp_val = warp_reduce_sum(dp_val);
         if (tid_d == 0) {
+            d_score_row[k_idx] = dp_val; // temporarily hold dp
             local_d_prob_sum += dp_val * prob_row[k_idx];
         }
     }
     float d_prob_sum = __shfl_sync(0xffffffff, local_d_prob_sum, 0);
 
-    // --- Step 4: Compute dQ and accumulate dK, dV in parallel across d ---
-    for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-        dQ[(size_t)q_idx * d_model + head_offset + d] = 0.0f;
+    for (uint32_t k_idx = tid_d; k_idx < max_k; k_idx += blockDim.x) {
+        d_score_row[k_idx] = prob_row[k_idx] * (d_score_row[k_idx] - d_prob_sum);
     }
+    __syncwarp();
+
+    // --- Step 4: Compute dQ (accumulated in registers) and accumulate dK, dV ---
+    float acc_dq_0 = 0.0f;
+    float acc_dq_1 = 0.0f;
 
     for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
-        const float* k_row = K + (size_t)k_idx * d_model + head_offset;
-        const float* v_row = V + (size_t)k_idx * d_model + head_offset;
-
-        // Compute full dp = dot(dOut_i, V_k) across all d
-        float partial_dp = 0.0f;
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            partial_dp += __ldg(&dout_row[d]) * __ldg(&v_row[d]);
-        }
-        float dp = warp_reduce_sum(partial_dp);
-        dp = __shfl_sync(0xffffffff, dp, 0);
-
         float p_val   = prob_row[k_idx];
-        float d_score = p_val * (dp - d_prob_sum);
+        float d_score = d_score_row[k_idx];
 
-        for (uint32_t d = tid_d; d < d_head; d += blockDim.x) {
-            float q_d    = __ldg(&q_row[d]);
-            float dout_d = __ldg(&dout_row[d]);
-            dQ[(size_t)q_idx * d_model + head_offset + d] += scale * d_score * __ldg(&k_row[d]);
-            atomicAdd(&dK[(size_t)k_idx * d_model + head_offset + d], scale * d_score * q_d);
-            atomicAdd(&dV[(size_t)k_idx * d_model + head_offset + d], p_val * dout_d);
+        const float* k_row = K + (size_t)k_idx * d_model + head_offset;
+
+        float k_0 = (tid_d < d_head) ? __ldg(&k_row[tid_d]) : 0.0f;
+        float k_1 = (tid_d + 32 < d_head) ? __ldg(&k_row[tid_d + 32]) : 0.0f;
+
+        acc_dq_0 += scale * d_score * k_0;
+        acc_dq_1 += scale * d_score * k_1;
+
+        if (tid_d < d_head) {
+            atomicAdd(&dK[(size_t)k_idx * d_model + head_offset + tid_d], scale * d_score * q_0);
+            atomicAdd(&dV[(size_t)k_idx * d_model + head_offset + tid_d], p_val * dout_0);
         }
+        if (tid_d + 32 < d_head) {
+            atomicAdd(&dK[(size_t)k_idx * d_model + head_offset + tid_d + 32], scale * d_score * q_1);
+            atomicAdd(&dV[(size_t)k_idx * d_model + head_offset + tid_d + 32], p_val * dout_1);
+        }
+    }
+
+    // Write dQ once from registers to global device memory
+    if (tid_d < d_head) {
+        dQ[(size_t)q_idx * d_model + head_offset + tid_d] = acc_dq_0;
+    }
+    if (tid_d + 32 < d_head) {
+        dQ[(size_t)q_idx * d_model + head_offset + tid_d + 32] = acc_dq_1;
     }
 }
 
