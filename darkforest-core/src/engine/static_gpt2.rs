@@ -464,13 +464,9 @@ impl StaticGPT2 {
         let m_ln_f_beta = Moments::for_tensor(&ln_f_beta)?;
         let m_lm_head = Moments::for_tensor(&lm_head)?;
 
-        // Pre-allocate Key-Value cache for autoregressive decoding
-        let mut decode_k_cache = Vec::with_capacity(n_layers);
-        let mut decode_v_cache = Vec::with_capacity(n_layers);
-        for _ in 0..n_layers {
-            decode_k_cache.push(DeviceTensor::zeros(vec![seq_len, d_model])?);
-            decode_v_cache.push(DeviceTensor::zeros(vec![seq_len, d_model])?);
-        }
+        // Key-Value cache for autoregressive decoding (allocated lazily on first decode)
+        let decode_k_cache = Vec::with_capacity(n_layers);
+        let decode_v_cache = Vec::with_capacity(n_layers);
 
         let d_single_tok = darkforest_cuda::memory::CudaBuffer::new(
             std::mem::size_of::<u32>(),
@@ -789,6 +785,12 @@ impl StaticGPT2 {
                 pos,
                 self.seq_len
             ));
+        }
+        if self.decode_k_cache.is_empty() {
+            for _ in 0..self.n_layers {
+                self.decode_k_cache.push(DeviceTensor::zeros(vec![self.seq_len, self.d_model])?);
+                self.decode_v_cache.push(DeviceTensor::zeros(vec![self.seq_len, self.d_model])?);
+            }
         }
         let scale = (self.d_model as f32 / self.n_heads as f32).powf(-0.5);
 
