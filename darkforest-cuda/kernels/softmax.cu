@@ -250,8 +250,8 @@ __global__ void kernel_fused_logit_ce(
     float wmax = warp_reduce_max(tmax);
     if (threadIdx.x % WARP_SIZE == 0) smem[threadIdx.x / WARP_SIZE] = wmax;
     __syncthreads();
-    if (threadIdx.x < n_warps) {
-        float v = smem[threadIdx.x];
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? smem[threadIdx.x] : -FLT_MAX;
         v = warp_reduce_max(v);
         if (threadIdx.x == 0) smem[0] = v;
     }
@@ -268,8 +268,8 @@ __global__ void kernel_fused_logit_ce(
     float wsum = warp_reduce_sum(tsum);
     if (threadIdx.x % WARP_SIZE == 0) smem[threadIdx.x / WARP_SIZE] = wsum;
     __syncthreads();
-    if (threadIdx.x < n_warps) {
-        float v = smem[threadIdx.x];
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? smem[threadIdx.x] : 0.0f;
         v = warp_reduce_sum(v);
         if (threadIdx.x == 0) smem[0] = v;
     }
@@ -288,8 +288,8 @@ __global__ void kernel_fused_logit_ce(
     float wloss = warp_reduce_sum(local_loss);
     if (threadIdx.x % WARP_SIZE == 0) smem[threadIdx.x / WARP_SIZE] = wloss;
     __syncthreads();
-    if (threadIdx.x < n_warps) {
-        float v = smem[threadIdx.x];
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? smem[threadIdx.x] : 0.0f;
         v = warp_reduce_sum(v);
         if (threadIdx.x == 0) atomicAdd(loss, v);
     }
@@ -306,6 +306,177 @@ extern "C" void launch_fused_logit_ce(
     cudaMemsetAsync(loss, 0, sizeof(float));
     uint32_t threads = max(32u, min(cols, 512u));
     uint32_t n_warps = (threads + WARP_SIZE - 1) / WARP_SIZE;
-    uint32_t shmem   = n_warps * sizeof(float);
+    uint32_t shmem   = max(n_warps, WARP_SIZE) * sizeof(float);
     kernel_fused_logit_ce<<<rows, threads, shmem>>>(logits, targets, grad_logits, loss, rows, cols);
+}
+
+// ---------------------------------------------------------------------------
+// FUSED CHUNKED LOGIT CE:
+// Computes softmax, loss, and grad_logits for a chunk of rows [0..chunk_rows]
+// accumulating loss across chunks scaled by total_seq_len (1 / total_rows).
+//
+// Inputs:
+//   logits [chunk_rows, cols]      — unnormalized logits (overwritten with probs in-place)
+//   targets [chunk_rows]           — target token IDs for this chunk
+// Outputs:
+//   grad_logits [chunk_rows, cols] — (prob - one_hot) / total_rows
+//   loss [1]                       — accumulates: loss += sum(-log(prob)) / total_rows
+// ---------------------------------------------------------------------------
+__global__ void kernel_fused_chunked_logit_ce(
+    float* __restrict__ logits,
+    const uint32_t* __restrict__ targets,
+    float* __restrict__ grad_logits,
+    float* __restrict__ loss,
+    uint32_t chunk_rows,
+    uint32_t cols,
+    uint32_t total_rows
+) {
+    uint32_t row = blockIdx.x;
+    if (row >= chunk_rows) return;
+
+    extern __shared__ float smem[];
+    float* row_ptr  = logits      + (size_t)row * cols;
+    float* grad_ptr = grad_logits + (size_t)row * cols;
+    uint32_t target  = targets[row];
+    uint32_t n_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+    float inv_total_rows = 1.0f / (float)total_rows;
+
+    // Pass 1: max reduction
+    float tmax = -FLT_MAX;
+    for (uint32_t i = threadIdx.x; i < cols; i += blockDim.x)
+        tmax = fmaxf(tmax, row_ptr[i]);
+    float wmax = warp_reduce_max(tmax);
+    if (threadIdx.x % WARP_SIZE == 0) smem[threadIdx.x / WARP_SIZE] = wmax;
+    __syncthreads();
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? smem[threadIdx.x] : -FLT_MAX;
+        v = warp_reduce_max(v);
+        if (threadIdx.x == 0) smem[0] = v;
+    }
+    __syncthreads();
+    float row_max = smem[0];
+
+    // Pass 2: exp + sum reduction
+    float tsum = 0.0f;
+    for (uint32_t i = threadIdx.x; i < cols; i += blockDim.x) {
+        float e = __expf(row_ptr[i] - row_max);
+        row_ptr[i] = e;
+        tsum += e;
+    }
+    float wsum = warp_reduce_sum(tsum);
+    if (threadIdx.x % WARP_SIZE == 0) smem[threadIdx.x / WARP_SIZE] = wsum;
+    __syncthreads();
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? smem[threadIdx.x] : 0.0f;
+        v = warp_reduce_sum(v);
+        if (threadIdx.x == 0) smem[0] = v;
+    }
+    __syncthreads();
+    float inv_sum = 1.0f / smem[0];
+
+    // Pass 3: normalize -> write probs, write grad, accumulate loss
+    float local_loss = 0.0f;
+    for (uint32_t i = threadIdx.x; i < cols; i += blockDim.x) {
+        float p = row_ptr[i] * inv_sum;
+        row_ptr[i]  = p;
+        float one_hot = (i == target) ? 1.0f : 0.0f;
+        grad_ptr[i] = (p - one_hot) * inv_total_rows;
+        if (i == target) local_loss = -__logf(fmaxf(p, 1e-12f)) * inv_total_rows;
+    }
+    float wloss = warp_reduce_sum(local_loss);
+    if (threadIdx.x % WARP_SIZE == 0) smem[threadIdx.x / WARP_SIZE] = wloss;
+    __syncthreads();
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? smem[threadIdx.x] : 0.0f;
+        v = warp_reduce_sum(v);
+        if (threadIdx.x == 0) atomicAdd(loss, v);
+    }
+}
+
+extern "C" void launch_fused_chunked_logit_ce(
+    float* logits,
+    const uint32_t* targets,
+    float* grad_logits,
+    float* loss,
+    uint32_t chunk_rows,
+    uint32_t cols,
+    uint32_t total_rows
+) {
+    uint32_t threads = max(32u, min(cols, 512u));
+    uint32_t n_warps = (threads + WARP_SIZE - 1) / WARP_SIZE;
+    uint32_t shmem   = max(n_warps, WARP_SIZE) * sizeof(float);
+    kernel_fused_chunked_logit_ce<<<chunk_rows, threads, shmem>>>(
+        logits, targets, grad_logits, loss, chunk_rows, cols, total_rows);
+}
+
+// ---------------------------------------------------------------------------
+// Lightweight eval-only cross entropy without materializing gradients
+// ---------------------------------------------------------------------------
+__global__ void kernel_chunked_ce_eval(
+    float* __restrict__ logits,
+    const uint32_t* __restrict__ targets,
+    float* __restrict__ loss,
+    uint32_t chunk_rows,
+    uint32_t cols,
+    uint32_t total_rows
+) {
+    uint32_t row = blockIdx.x;
+    if (row >= chunk_rows) return;
+
+    extern __shared__ float smem[];
+    float* row_ptr  = logits + (size_t)row * cols;
+    uint32_t target = targets[row];
+    uint32_t n_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+    float inv_total_rows = 1.0f / (float)total_rows;
+
+    float tmax = -FLT_MAX;
+    for (uint32_t i = threadIdx.x; i < cols; i += blockDim.x)
+        tmax = fmaxf(tmax, row_ptr[i]);
+    float wmax = warp_reduce_max(tmax);
+    if (threadIdx.x % WARP_SIZE == 0) smem[threadIdx.x / WARP_SIZE] = wmax;
+    __syncthreads();
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? smem[threadIdx.x] : -FLT_MAX;
+        v = warp_reduce_max(v);
+        if (threadIdx.x == 0) smem[0] = v;
+    }
+    __syncthreads();
+    float row_max = smem[0];
+
+    float tsum = 0.0f;
+    for (uint32_t i = threadIdx.x; i < cols; i += blockDim.x) {
+        float e = __expf(row_ptr[i] - row_max);
+        tsum += e;
+    }
+    float wsum = warp_reduce_sum(tsum);
+    if (threadIdx.x % WARP_SIZE == 0) smem[threadIdx.x / WARP_SIZE] = wsum;
+    __syncthreads();
+    if (threadIdx.x < WARP_SIZE) {
+        float v = (threadIdx.x < n_warps) ? smem[threadIdx.x] : 0.0f;
+        v = warp_reduce_sum(v);
+        if (threadIdx.x == 0) smem[0] = v;
+    }
+    __syncthreads();
+    float sum = smem[0];
+
+    if (threadIdx.x == 0) {
+        float z_target = row_ptr[target];
+        float row_loss = (-(z_target - row_max) + __logf(fmaxf(sum, 1e-12f))) * inv_total_rows;
+        atomicAdd(loss, row_loss);
+    }
+}
+
+extern "C" void launch_chunked_ce_eval(
+    float* logits,
+    const uint32_t* targets,
+    float* loss,
+    uint32_t chunk_rows,
+    uint32_t cols,
+    uint32_t total_rows
+) {
+    uint32_t threads = max(32u, min(cols, 512u));
+    uint32_t n_warps = (threads + WARP_SIZE - 1) / WARP_SIZE;
+    uint32_t shmem   = max(n_warps, WARP_SIZE) * sizeof(float);
+    kernel_chunked_ce_eval<<<chunk_rows, threads, shmem>>>(
+        logits, targets, loss, chunk_rows, cols, total_rows);
 }

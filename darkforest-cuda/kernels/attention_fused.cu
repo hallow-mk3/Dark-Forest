@@ -334,11 +334,11 @@ extern "C" void launch_attention_backward(
 }
 
 // ---------------------------------------------------------------------------
-// Multi-Head Attention (MHA) Tiled Backward Pass
-// Grid: ( (seq_len + THREADS_Q - 1) / THREADS_Q, n_heads )
-// Block: (THREADS_D = 32, THREADS_Q = 4) = 128 threads
+// Multi-Head Attention (MHA) Tiled Backward Pass (Per-Head Streamlined)
+// Evaluates one head at a time, reusing the [seq_len x seq_len] probability
+// scratch buffer across heads, cutting VRAM by 12x (from 768 MB to 64 MB at S=4096).
 // ---------------------------------------------------------------------------
-__global__ void kernel_mha_bwd_tiled(
+__global__ void kernel_mha_bwd_single_head(
     const float* __restrict__ Q,
     const float* __restrict__ K,
     const float* __restrict__ V,
@@ -347,23 +347,23 @@ __global__ void kernel_mha_bwd_tiled(
     float* __restrict__ dK,
     float* __restrict__ dV,
     float* __restrict__ probabilities,
+    uint32_t head_idx,
     uint32_t n_heads,
     uint32_t seq_len,
     uint32_t d_head,
     float scale,
     uint32_t is_causal
 ) {
-    uint32_t h = blockIdx.y;
+    uint32_t h = head_idx;
     uint32_t tid_d = threadIdx.x; // [0..31]
     uint32_t tid_q = threadIdx.y; // [0..3]
     uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
 
-    if (h >= n_heads || q_idx >= seq_len) return;
+    if (q_idx >= seq_len) return;
 
     uint32_t d_model = n_heads * d_head;
     uint32_t head_offset = h * d_head;
-    float* prob_head = probabilities + (size_t)h * seq_len * seq_len;
-    float* prob_row  = prob_head + (size_t)q_idx * seq_len;
+    float* prob_row  = probabilities + (size_t)q_idx * seq_len;
 
     uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
 
@@ -461,12 +461,14 @@ extern "C" void launch_fused_mha_backward(
     cudaMemsetAsync(d_v, 0, gradient_bytes);
 
     dim3 block_dim(32, 4); // 32 lanes for d dimension, 4 query tokens per block
-    dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y, n_heads);
+    dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y, 1);
 
-    kernel_mha_bwd_tiled<<<grid_dim, block_dim>>>(
-        q, k, v, d_out, d_q, d_k, d_v, probabilities,
-        n_heads, seq_len, d_head, scale, causal
-    );
+    for (uint32_t h = 0; h < n_heads; ++h) {
+        kernel_mha_bwd_single_head<<<grid_dim, block_dim>>>(
+            q, k, v, d_out, d_q, d_k, d_v, probabilities,
+            h, n_heads, seq_len, d_head, scale, causal
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1145,6 +1145,139 @@ impl DeviceTensor {
         }
     }
 
+    /// Linear projection of a contiguous slice of rows:
+    /// out_chunk [chunk_rows, out_features] = x_slice [chunk_rows, in_features] @ weight^T [in_features, out_features]
+    pub fn linear_slice_into(
+        x: &DeviceTensor,
+        start_row: usize,
+        chunk_rows: usize,
+        weight: &DeviceTensor,
+        out_chunk: &mut DeviceTensor,
+    ) -> Result<()> {
+        let in_features = x.shape[1];
+        let out_features = weight.shape[0];
+        if weight.shape[1] != in_features {
+            return Err(anyhow!("linear in_features mismatch"));
+        }
+        if out_chunk.shape[1] != out_features {
+            return Err(anyhow!("out_chunk out_features mismatch"));
+        }
+
+        #[cfg(darkforest_cuda_kernels)]
+        unsafe {
+            let handle = get_cublas_handle()?;
+            let alpha = 1.0f32;
+            let beta = 0.0f32;
+            let x_ptr = x.as_ptr().add(start_row * in_features);
+            let status = cublas::cublasSgemm_v2(
+                handle,
+                cublas::CUBLAS_OP_T,
+                cublas::CUBLAS_OP_N,
+                out_features as i32,
+                chunk_rows as i32,
+                in_features as i32,
+                &alpha,
+                weight.as_ptr(),
+                in_features as i32,
+                x_ptr,
+                in_features as i32,
+                &beta,
+                out_chunk.as_mut_ptr(),
+                out_features as i32,
+            );
+            if status != 0 {
+                return Err(anyhow!("cublasSgemm_v2 linear_slice failed with code {status}"));
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(darkforest_cuda_kernels))]
+        {
+            let _ = (x, start_row, chunk_rows, weight, out_chunk);
+            return Err(anyhow!("CUDA kernels required for linear_slice_into"));
+        }
+    }
+
+    /// Backward for a chunk of the linear LM-head projection:
+    /// 1. Accumulate d_weight += chunk_d_logits^T @ x_slice  [out_features, in_features]
+    /// 2. Compute d_x_slice = chunk_d_logits @ weight       [chunk_rows, in_features]
+    pub fn linear_backward_chunk_into(
+        x: &DeviceTensor,
+        start_row: usize,
+        chunk_rows: usize,
+        weight: &DeviceTensor,
+        chunk_d_logits: &DeviceTensor,
+        d_x: &mut DeviceTensor,
+        d_weight: &mut DeviceTensor,
+        is_first_chunk: bool,
+    ) -> Result<()> {
+        let in_features = x.shape[1];
+        let out_features = weight.shape[0];
+
+        #[cfg(darkforest_cuda_kernels)]
+        unsafe {
+            let handle = get_cublas_handle()?;
+            let alpha = 1.0f32;
+            let beta_w = if is_first_chunk { 0.0f32 } else { 1.0f32 };
+            let beta_x = 0.0f32;
+
+            let x_ptr = x.as_ptr().add(start_row * in_features);
+            let d_x_ptr = d_x.as_mut_ptr().add(start_row * in_features);
+
+            // 1. d_x_slice = chunk_d_logits @ weight
+            // Col-major: d_x^T [in_features, chunk_rows] = weight_col [in_features, out_features] @ chunk_d_logits_col [out_features, chunk_rows]
+            let status_x = cublas::cublasSgemm_v2(
+                handle,
+                cublas::CUBLAS_OP_N,
+                cublas::CUBLAS_OP_N,
+                in_features as i32,
+                chunk_rows as i32,
+                out_features as i32,
+                &alpha,
+                weight.as_ptr(),
+                in_features as i32,
+                chunk_d_logits.as_ptr(),
+                out_features as i32,
+                &beta_x,
+                d_x_ptr,
+                in_features as i32,
+            );
+            if status_x != 0 {
+                return Err(anyhow!("cublas linear_backward_chunk d_x failed: {status_x}"));
+            }
+
+            // 2. d_weight += chunk_d_logits^T @ x_slice
+            // Col-major: d_weight^T [in_features, out_features] = x_slice_col [in_features, chunk_rows] @ chunk_d_logits_col^T [chunk_rows, out_features]
+            let status_w = cublas::cublasSgemm_v2(
+                handle,
+                cublas::CUBLAS_OP_N,
+                cublas::CUBLAS_OP_T,
+                in_features as i32,
+                out_features as i32,
+                chunk_rows as i32,
+                &alpha,
+                x_ptr,
+                in_features as i32,
+                chunk_d_logits.as_ptr(),
+                out_features as i32,
+                &beta_w,
+                d_weight.as_mut_ptr(),
+                in_features as i32,
+            );
+            if status_w != 0 {
+                return Err(anyhow!("cublas linear_backward_chunk d_weight failed: {status_w}"));
+            }
+
+            return Ok(());
+        }
+
+        #[cfg(not(darkforest_cuda_kernels))]
+        {
+            let _ = (x, start_row, chunk_rows, weight, chunk_d_logits, d_x, d_weight, is_first_chunk);
+            return Err(anyhow!("CUDA kernels required for linear_backward_chunk_into"));
+        }
+    }
+
     /// BF16 mixed-precision linear: X [batch, in] @ W^T [in, out] → out [batch, out].
     ///
     /// Casts X and W to BF16 on the fly, runs cublasGemmEx with CUBLAS_COMPUTE_32F
@@ -1684,6 +1817,60 @@ impl DeviceTensor {
         )?;
         Ok(())
     }
+
+    /// Chunked Fused Logit CE:
+    /// Computes softmax, loss, and grad_logits for row slice [start_row..start_row + chunk_rows],
+    /// scaling loss and grad_logits by total_rows (S).
+    pub fn fused_chunked_logit_ce(
+        logits: &mut DeviceTensor,
+        d_targets: &memory::CudaBuffer,
+        start_row: usize,
+        chunk_rows: usize,
+        total_rows: usize,
+        grad_logits: &mut DeviceTensor,
+        loss: &mut DeviceTensor,
+    ) -> Result<()> {
+        let cols = *logits
+            .shape
+            .last()
+            .ok_or_else(|| anyhow!("chunked logit_ce empty shape"))?;
+        let targets_ptr = unsafe { (d_targets.ptr as *const u32).add(start_row) };
+        kernels::cuda_fused_chunked_logit_ce(
+            logits.as_mut_ptr(),
+            targets_ptr,
+            grad_logits.as_mut_ptr(),
+            loss.as_mut_ptr(),
+            chunk_rows,
+            cols,
+            total_rows,
+        )?;
+        Ok(())
+    }
+
+    /// Chunked evaluation-only cross-entropy loss (no gradient materialization).
+    pub fn chunked_ce_eval(
+        logits: &mut DeviceTensor,
+        d_targets: &memory::CudaBuffer,
+        start_row: usize,
+        chunk_rows: usize,
+        total_rows: usize,
+        loss: &mut DeviceTensor,
+    ) -> Result<()> {
+        let cols = *logits
+            .shape
+            .last()
+            .ok_or_else(|| anyhow!("chunked ce eval empty shape"))?;
+        let targets_ptr = unsafe { (d_targets.ptr as *const u32).add(start_row) };
+        kernels::cuda_chunked_ce_eval(
+            logits.as_mut_ptr(),
+            targets_ptr,
+            loss.as_mut_ptr(),
+            chunk_rows,
+            cols,
+            total_rows,
+        )?;
+        Ok(())
+    }
 }
 
 pub struct AttentionContext {
@@ -1691,52 +1878,76 @@ pub struct AttentionContext {
     pub seq_len: usize,
     pub d_head: usize,
     pub d_model: usize,
-    q: memory::CudaBuffer,
-    k: memory::CudaBuffer,
-    v: memory::CudaBuffer,
-    d_out: memory::CudaBuffer,
-    out: memory::CudaBuffer,
-    d_q: memory::CudaBuffer,
-    d_k: memory::CudaBuffer,
-    d_v: memory::CudaBuffer,
-    probabilities: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    q: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    k: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    v: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    d_out: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    out: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    d_q: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    d_k: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    d_v: std::sync::Mutex<Option<memory::CudaBuffer>>,
+    probabilities: std::sync::Arc<std::sync::Mutex<Option<memory::CudaBuffer>>>,
 }
 
 impl AttentionContext {
     pub fn new(n_heads: usize, seq_len: usize, d_head: usize) -> Result<Self> {
+        Self::new_shared(
+            n_heads,
+            seq_len,
+            d_head,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        )
+    }
+
+    pub fn new_shared(
+        n_heads: usize,
+        seq_len: usize,
+        d_head: usize,
+        probabilities: std::sync::Arc<std::sync::Mutex<Option<memory::CudaBuffer>>>,
+    ) -> Result<Self> {
         if d_head == 0 || d_head > 128 {
             return Err(anyhow!("d_head must be in the range 1..=128"));
         }
         let d_model = n_heads
             .checked_mul(d_head)
             .ok_or_else(|| anyhow!("d_model overflow"))?;
-        let elements = seq_len
+        let _elements = seq_len
             .checked_mul(d_model)
             .ok_or_else(|| anyhow!("attention shape is too large"))?;
-        let allocator = Arc::new(memory::GpuAllocator);
-        let bytes = elements * std::mem::size_of::<f32>();
         Ok(Self {
             n_heads,
             seq_len,
             d_head,
             d_model,
-            q: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            k: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            v: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            d_out: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            out: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            d_q: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            d_k: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            d_v: memory::CudaBuffer::new(bytes, allocator.clone())?,
-            probabilities: std::sync::Mutex::new(None),
+            q: std::sync::Mutex::new(None),
+            k: std::sync::Mutex::new(None),
+            v: std::sync::Mutex::new(None),
+            d_out: std::sync::Mutex::new(None),
+            out: std::sync::Mutex::new(None),
+            d_q: std::sync::Mutex::new(None),
+            d_k: std::sync::Mutex::new(None),
+            d_v: std::sync::Mutex::new(None),
+            probabilities,
         })
+    }
+
+    fn ensure_buffer<'a>(
+        mutex: &'a std::sync::Mutex<Option<memory::CudaBuffer>>,
+        bytes: usize,
+    ) -> Result<std::sync::MutexGuard<'a, Option<memory::CudaBuffer>>> {
+        let mut guard = mutex.lock().map_err(|e| anyhow!("{e}"))?;
+        if guard.is_none() {
+            let allocator = Arc::new(memory::GpuAllocator);
+            *guard = Some(memory::CudaBuffer::new(bytes, allocator)?);
+        }
+        Ok(guard)
     }
 
     fn ensure_probabilities(&self) -> Result<std::sync::MutexGuard<'_, Option<memory::CudaBuffer>>> {
         let mut guard = self.probabilities.lock().map_err(|e| anyhow!("{e}"))?;
         if guard.is_none() {
             let allocator = Arc::new(memory::GpuAllocator);
-            let workspace_bytes = self.n_heads * self.seq_len * self.seq_len * std::mem::size_of::<f32>();
+            let workspace_bytes = self.seq_len * self.seq_len * std::mem::size_of::<f32>();
             *guard = Some(memory::CudaBuffer::new(workspace_bytes, allocator)?);
         }
         Ok(guard)
@@ -1912,21 +2123,28 @@ impl AttentionContext {
         scale: f32,
         causal: bool,
     ) -> Result<Vec<f32>> {
-        self.q.upload(q)?;
-        self.k.upload(k)?;
-        self.v.upload(v)?;
+        let bytes = self.seq_len * self.d_model * std::mem::size_of::<f32>();
+        let mut q_buf = Self::ensure_buffer(&self.q, bytes)?;
+        let mut k_buf = Self::ensure_buffer(&self.k, bytes)?;
+        let mut v_buf = Self::ensure_buffer(&self.v, bytes)?;
+        let out_buf = Self::ensure_buffer(&self.out, bytes)?;
+
+        q_buf.as_mut().unwrap().upload(q)?;
+        k_buf.as_mut().unwrap().upload(k)?;
+        v_buf.as_mut().unwrap().upload(v)?;
+
         kernels::cuda_fused_attention(
-            self.q.ptr as *const f32,
-            self.k.ptr as *const f32,
-            self.v.ptr as *const f32,
-            self.out.ptr as *mut f32,
+            q_buf.as_ref().unwrap().ptr as *const f32,
+            k_buf.as_ref().unwrap().ptr as *const f32,
+            v_buf.as_ref().unwrap().ptr as *const f32,
+            out_buf.as_ref().unwrap().ptr as *mut f32,
             self.seq_len,
             self.d_head,
             scale,
             causal,
         )?;
         let mut out = Vec::new();
-        self.out.download(&mut out)?;
+        out_buf.as_ref().unwrap().download(&mut out)?;
         Ok(out)
     }
 
@@ -1936,17 +2154,26 @@ impl AttentionContext {
         scale: f32,
         causal: bool,
     ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>)> {
-        self.d_out.upload(d_out)?;
+        let bytes = self.seq_len * self.d_model * std::mem::size_of::<f32>();
+        let mut d_out_buf = Self::ensure_buffer(&self.d_out, bytes)?;
+        let q_buf = Self::ensure_buffer(&self.q, bytes)?;
+        let k_buf = Self::ensure_buffer(&self.k, bytes)?;
+        let v_buf = Self::ensure_buffer(&self.v, bytes)?;
+        let d_q_buf = Self::ensure_buffer(&self.d_q, bytes)?;
+        let d_k_buf = Self::ensure_buffer(&self.d_k, bytes)?;
+        let d_v_buf = Self::ensure_buffer(&self.d_v, bytes)?;
+
+        d_out_buf.as_mut().unwrap().upload(d_out)?;
         let prob_guard = self.ensure_probabilities()?;
         let prob_ptr = prob_guard.as_ref().unwrap().ptr as *mut f32;
         kernels::cuda_attention_backward(
-            self.q.ptr as *const f32,
-            self.k.ptr as *const f32,
-            self.v.ptr as *const f32,
-            self.d_out.ptr as *const f32,
-            self.d_q.ptr as *mut f32,
-            self.d_k.ptr as *mut f32,
-            self.d_v.ptr as *mut f32,
+            q_buf.as_ref().unwrap().ptr as *const f32,
+            k_buf.as_ref().unwrap().ptr as *const f32,
+            v_buf.as_ref().unwrap().ptr as *const f32,
+            d_out_buf.as_ref().unwrap().ptr as *const f32,
+            d_q_buf.as_ref().unwrap().ptr as *mut f32,
+            d_k_buf.as_ref().unwrap().ptr as *mut f32,
+            d_v_buf.as_ref().unwrap().ptr as *mut f32,
             prob_ptr,
             self.seq_len,
             self.d_head,
@@ -1956,9 +2183,9 @@ impl AttentionContext {
         let mut d_q = Vec::new();
         let mut d_k = Vec::new();
         let mut d_v = Vec::new();
-        self.d_q.download(&mut d_q)?;
-        self.d_k.download(&mut d_k)?;
-        self.d_v.download(&mut d_v)?;
+        d_q_buf.as_ref().unwrap().download(&mut d_q)?;
+        d_k_buf.as_ref().unwrap().download(&mut d_k)?;
+        d_v_buf.as_ref().unwrap().download(&mut d_v)?;
         Ok((d_q, d_k, d_v))
     }
 }

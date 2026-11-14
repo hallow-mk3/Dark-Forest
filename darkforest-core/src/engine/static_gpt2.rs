@@ -56,28 +56,39 @@ struct LayerActivations {
     mlp_out: DeviceTensor,  // [seq, d_model]
 }
 
-/// Per-layer gradient buffers (pre-allocated, reused every step).
+/// Global scratch buffers for backward pass across all transformer layers.
+/// Since backward executes sequentially (layer N-1 down to 0), these intermediate
+/// gradient activation tensors are safely shared across all layers.
+#[cfg(feature = "cuda")]
+struct LayerBackwardScratch {
+    // Upstream gradient flowing into layer
+    dx: DeviceTensor, // [seq, d_model]
+    // MLP backward intermediate gradients
+    d_mlp_out: DeviceTensor, // [seq, d_model]
+    d_mlp_a: DeviceTensor,   // [seq, d_ff]
+    d_mlp_h: DeviceTensor,   // [seq, d_ff]
+    d_ln2_out: DeviceTensor, // [seq, d_model]
+    // Attention backward intermediate gradients
+    d_proj_out: DeviceTensor, // [seq, d_model]
+    d_attn_out: DeviceTensor, // [seq, d_model]
+    d_q: DeviceTensor,        // [seq, d_model]
+    d_k: DeviceTensor,        // [seq, d_model]
+    d_v: DeviceTensor,        // [seq, d_model]
+    d_ln1_out: DeviceTensor,  // [seq, d_model]
+}
+
+/// Per-layer parameter gradient buffers (pre-allocated, reused every step).
+/// Holds only the weight/bias gradients needed for AdamW updates and gradient clipping.
 #[cfg(feature = "cuda")]
 struct LayerGrads {
-    // upstream gradient flowing into this layer from above
-    dx: DeviceTensor, // [seq, d_model]
-    // MLP backward
-    d_mlp_out: DeviceTensor,   // [seq, d_model]
-    d_mlp_a: DeviceTensor,     // [seq, d_ff]
-    d_mlp_h: DeviceTensor,     // [seq, d_ff]
+    // MLP parameter gradients
     d_w2: DeviceTensor,        // [d_model, d_ff]
     d_b2: DeviceTensor,        // [d_model]
     d_w1: DeviceTensor,        // [d_ff, d_model]
     d_b1: DeviceTensor,        // [d_ff]
-    d_ln2_out: DeviceTensor,   // [seq, d_model]
     d_ln2_gamma: DeviceTensor, // [d_model]
     d_ln2_beta: DeviceTensor,  // [d_model]
-    // Attention backward
-    d_proj_out: DeviceTensor,  // [seq, d_model]
-    d_attn_out: DeviceTensor,  // [seq, d_model]
-    d_q: DeviceTensor,         // [seq, d_model]
-    d_k: DeviceTensor,         // [seq, d_model]
-    d_v: DeviceTensor,         // [seq, d_model]
+    // Attention parameter gradients
     d_wo: DeviceTensor,        // [d_model, d_model]
     d_bo: DeviceTensor,        // [d_model]
     d_wq: DeviceTensor,        // [d_model, d_model]
@@ -86,7 +97,6 @@ struct LayerGrads {
     d_bk: DeviceTensor,        // [d_model]
     d_wv: DeviceTensor,        // [d_model, d_model]
     d_bv: DeviceTensor,        // [d_model]
-    d_ln1_out: DeviceTensor,   // [seq, d_model]
     d_ln1_gamma: DeviceTensor, // [d_model]
     d_ln1_beta: DeviceTensor,  // [d_model]
 }
@@ -138,15 +148,17 @@ pub struct StaticGPT2 {
     ln_f_out: DeviceTensor,    // [seq, d_model]
     ln_f_mean: DeviceTensor,   // [seq]
     ln_f_rstd: DeviceTensor,   // [seq]
-    logits: DeviceTensor,      // [seq, vocab_size]
     loss_tensor: DeviceTensor, // [1]
-    probs: DeviceTensor,       // [seq, vocab_size]
-    grad_one: DeviceTensor,    // [1]
+
+    // Chunked Cross-Entropy & Shared Backward buffers
+    chunk_size: usize,
+    chunk_logits: DeviceTensor,   // [chunk_size, vocab_size]
+    chunk_d_logits: DeviceTensor, // [chunk_size, vocab_size]
+    bwd_scratch: LayerBackwardScratch,
 
     // Pinned host buffer for async loss D2H (no CPU-GPU sync inside step)
     pinned_loss: darkforest_cuda::memory::PinnedBuffer,
     // Gradient buffers
-    d_logits: DeviceTensor,     // [seq, vocab_size]
     d_lm_head: DeviceTensor,    // [vocab_size, d_model]
     d_ln_f_out: DeviceTensor,   // [seq, d_model]
     d_ln_f_gamma: DeviceTensor, // [d_model]
@@ -280,34 +292,34 @@ impl StaticGPT2 {
                 "StaticGPT2 head dimension must be <= 128, got {d_head}"
             ));
         }
-        let std_emb = (d_model as f32).powf(-0.5);
-        let std_proj = (2.0f32 / d_model as f32).sqrt();
-        let std_ff = (2.0f32 / d_model as f32).sqrt();
+        let std_dev = 0.02f32;
+        let std_residual = 0.02f32 / (2.0f32 * n_layers as f32).sqrt();
 
-        let tok_emb = randn_device(vec![vocab_size, d_model], std_emb)?;
-        let pos_emb = randn_device(vec![seq_len, d_model], std_emb)?;
+        let tok_emb = randn_device(vec![vocab_size, d_model], std_dev)?;
+        let pos_emb = randn_device(vec![seq_len, d_model], std_dev)?;
         let ln_f_gamma = DeviceTensor::ones(vec![d_model])?;
         let ln_f_beta = DeviceTensor::zeros(vec![d_model])?;
-        let lm_head = randn_device(vec![vocab_size, d_model], std_proj)?;
+        let lm_head = randn_device(vec![vocab_size, d_model], std_dev)?;
 
         let mut layers = Vec::with_capacity(n_layers);
         let mut layer_acts = Vec::with_capacity(n_layers);
         let mut layer_grads = Vec::with_capacity(n_layers);
         let mut layer_moments = Vec::with_capacity(n_layers);
         let mut attn_contexts = Vec::with_capacity(n_layers);
+        let shared_attn_prob = std::sync::Arc::new(std::sync::Mutex::new(None));
 
         for _ in 0..n_layers {
-            let wq = randn_device(vec![d_model, d_model], std_proj)?;
+            let wq = randn_device(vec![d_model, d_model], std_dev)?;
             let bq = DeviceTensor::zeros(vec![d_model])?;
-            let wk = randn_device(vec![d_model, d_model], std_proj)?;
+            let wk = randn_device(vec![d_model, d_model], std_dev)?;
             let bk = DeviceTensor::zeros(vec![d_model])?;
-            let wv = randn_device(vec![d_model, d_model], std_proj)?;
+            let wv = randn_device(vec![d_model, d_model], std_dev)?;
             let bv = DeviceTensor::zeros(vec![d_model])?;
-            let wo = randn_device(vec![d_model, d_model], std_proj)?;
+            let wo = randn_device(vec![d_model, d_model], std_residual)?;
             let bo = DeviceTensor::zeros(vec![d_model])?;
-            let w1 = randn_device(vec![d_ff, d_model], std_ff)?;
+            let w1 = randn_device(vec![d_ff, d_model], std_dev)?;
             let b1 = DeviceTensor::zeros(vec![d_ff])?;
-            let w2 = randn_device(vec![d_model, d_ff], std_ff)?;
+            let w2 = randn_device(vec![d_model, d_ff], std_residual)?;
             let b2 = DeviceTensor::zeros(vec![d_model])?;
             let ln1_gamma = DeviceTensor::ones(vec![d_model])?;
             let ln1_beta = DeviceTensor::zeros(vec![d_model])?;
@@ -371,24 +383,14 @@ impl StaticGPT2 {
                 mlp_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             });
 
-            // Pre-allocate gradient buffers
+            // Pre-allocate parameter gradient buffers (intermediate activations shared in bwd_scratch)
             layer_grads.push(LayerGrads {
-                dx: DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_mlp_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_mlp_a: DeviceTensor::zeros(vec![seq_len, d_ff])?,
-                d_mlp_h: DeviceTensor::zeros(vec![seq_len, d_ff])?,
                 d_w2: DeviceTensor::zeros(vec![d_model, d_ff])?,
                 d_b2: DeviceTensor::zeros(vec![d_model])?,
                 d_w1: DeviceTensor::zeros(vec![d_ff, d_model])?,
                 d_b1: DeviceTensor::zeros(vec![d_ff])?,
-                d_ln2_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 d_ln2_gamma: DeviceTensor::zeros(vec![d_model])?,
                 d_ln2_beta: DeviceTensor::zeros(vec![d_model])?,
-                d_proj_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_attn_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_q: DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_k: DeviceTensor::zeros(vec![seq_len, d_model])?,
-                d_v: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 d_wo: DeviceTensor::zeros(vec![d_model, d_model])?,
                 d_bo: DeviceTensor::zeros(vec![d_model])?,
                 d_wq: DeviceTensor::zeros(vec![d_model, d_model])?,
@@ -397,15 +399,37 @@ impl StaticGPT2 {
                 d_bk: DeviceTensor::zeros(vec![d_model])?,
                 d_wv: DeviceTensor::zeros(vec![d_model, d_model])?,
                 d_bv: DeviceTensor::zeros(vec![d_model])?,
-                d_ln1_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 d_ln1_gamma: DeviceTensor::zeros(vec![d_model])?,
                 d_ln1_beta: DeviceTensor::zeros(vec![d_model])?,
             });
 
-            attn_contexts.push(std::sync::Arc::new(AttentionContext::new(
-                n_heads, seq_len, d_head,
+            attn_contexts.push(std::sync::Arc::new(AttentionContext::new_shared(
+                n_heads,
+                seq_len,
+                d_head,
+                shared_attn_prob.clone(),
             )?));
         }
+
+        // Shared backward scratch across all layers (allocated ONCE)
+        let bwd_scratch = LayerBackwardScratch {
+            dx: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_mlp_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_mlp_a: DeviceTensor::zeros(vec![seq_len, d_ff])?,
+            d_mlp_h: DeviceTensor::zeros(vec![seq_len, d_ff])?,
+            d_ln2_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_proj_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_attn_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_q: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_k: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_v: DeviceTensor::zeros(vec![seq_len, d_model])?,
+            d_ln1_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
+        };
+
+        // Chunked Cross-Entropy buffers (bounded to chunk_size <= 512, saving gigabytes at long context)
+        let chunk_size = seq_len.min(512);
+        let chunk_logits = DeviceTensor::zeros(vec![chunk_size, vocab_size])?;
+        let chunk_d_logits = DeviceTensor::zeros(vec![chunk_size, vocab_size])?;
 
         // x buffers entering each layer + after final ln
         let mut x_in = Vec::with_capacity(n_layers + 1);
@@ -486,11 +510,11 @@ impl StaticGPT2 {
             ln_f_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             ln_f_mean: DeviceTensor::zeros(vec![seq_len])?,
             ln_f_rstd: DeviceTensor::zeros(vec![seq_len])?,
-            logits: DeviceTensor::zeros(vec![seq_len, vocab_size])?,
             loss_tensor: DeviceTensor::zeros(vec![1])?,
-            probs: DeviceTensor::zeros(vec![seq_len, vocab_size])?,
-            grad_one: DeviceTensor::ones(vec![1])?,
-            d_logits: DeviceTensor::zeros(vec![seq_len, vocab_size])?,
+            chunk_size,
+            chunk_logits,
+            chunk_d_logits,
+            bwd_scratch,
             d_lm_head: DeviceTensor::zeros(vec![vocab_size, d_model])?,
             d_ln_f_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             d_ln_f_gamma: DeviceTensor::zeros(vec![d_model])?,
@@ -620,8 +644,8 @@ impl StaticGPT2 {
 
     /// Run one validation / evaluation step: forward pass and cross-entropy loss computation.
     ///
-    /// Computes the exact validation loss without materializing backward gradients or
-    /// executing AdamW weight updates.
+    /// Computes the exact validation loss using chunked cross-entropy without materializing
+    /// full sequence logits or backward gradients, keeping VRAM strictly flat.
     pub fn eval_step(&mut self, input_tokens: &[usize], target_tokens: &[usize]) -> Result<f32> {
         if input_tokens.len() != self.seq_len || target_tokens.len() != self.seq_len {
             return Err(anyhow!(
@@ -643,14 +667,30 @@ impl StaticGPT2 {
         self.d_target_indices
             .upload_bytes(self.h_target_u32.as_ptr() as *const u8, self.seq_len * 4)?;
 
-        self.forward_inner()?;
+        self.forward_inner_features()?;
+        self.loss_tensor.zero_()?;
 
-        DeviceTensor::cross_entropy_device_targets(
-            &self.logits,
-            &self.d_target_indices,
-            &mut self.probs,
-            &mut self.loss_tensor,
-        )?;
+        let mut start = 0;
+        while start < self.seq_len {
+            let chunk_len = (self.seq_len - start).min(self.chunk_size);
+            DeviceTensor::linear_slice_into(
+                &self.ln_f_out,
+                start,
+                chunk_len,
+                &self.lm_head,
+                &mut self.chunk_logits,
+            )?;
+            DeviceTensor::chunked_ce_eval(
+                &mut self.chunk_logits,
+                &self.d_target_indices,
+                start,
+                chunk_len,
+                self.seq_len,
+                &mut self.loss_tensor,
+            )?;
+            start += chunk_len;
+        }
+
         self.loss_tensor
             .async_download_scalar_f32(&self.pinned_loss)?;
         crate::cuda_sync()?;
@@ -661,7 +701,7 @@ impl StaticGPT2 {
     /// Run the forward inference pass for the input tokens.
     ///
     /// Returns the full unnormalized output logits matrix of shape `[seq_len, vocab_size]`
-    /// as a flat `Vec<f32>` in row-major order.
+    /// as a flat `Vec<f32>` in row-major order, streaming via chunks to avoid GPU VRAM spikes.
     pub fn forward(&mut self, input_tokens: &[usize]) -> Result<Vec<f32>> {
         if input_tokens.len() != self.seq_len {
             return Err(anyhow!(
@@ -676,15 +716,31 @@ impl StaticGPT2 {
         self.d_input_indices
             .upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
 
-        self.forward_inner()?;
-        crate::cuda_sync()?;
-        self.logits.download()
+        self.forward_inner_features()?;
+        let mut out = vec![0.0f32; self.seq_len * self.vocab_size];
+        let mut start = 0;
+        while start < self.seq_len {
+            let chunk_len = (self.seq_len - start).min(self.chunk_size);
+            DeviceTensor::linear_slice_into(
+                &self.ln_f_out,
+                start,
+                chunk_len,
+                &self.lm_head,
+                &mut self.chunk_logits,
+            )?;
+            crate::cuda_sync()?;
+            let chunk_data = self.chunk_logits.download_slice(0, chunk_len * self.vocab_size)?;
+            out[start * self.vocab_size..(start + chunk_len) * self.vocab_size]
+                .copy_from_slice(&chunk_data);
+            start += chunk_len;
+        }
+        Ok(out)
     }
 
     /// Extract unnormalized prediction logits `[vocab_size]` for the final token position in the context.
     ///
-    /// Optimized to download only the final row slice (vocab_size floats = ~200 KB) instead of the
-    /// full sequence logits tensor (up to 205 MB), eliminating PCIe bus saturation.
+    /// Evaluates only the final token's projection into decode_logits [1, vocab_size],
+    /// avoiding materialization or download of full sequence logits.
     pub fn forward_last_logits(&mut self, input_tokens: &[usize]) -> Result<Vec<f32>> {
         if input_tokens.len() != self.seq_len {
             return Err(anyhow!(
@@ -699,10 +755,16 @@ impl StaticGPT2 {
         self.d_input_indices
             .upload_bytes(self.h_input_u32.as_ptr() as *const u8, self.seq_len * 4)?;
 
-        self.forward_inner()?;
+        self.forward_inner_features()?;
+        DeviceTensor::linear_slice_into(
+            &self.ln_f_out,
+            self.seq_len - 1,
+            1,
+            &self.lm_head,
+            &mut self.decode_logits,
+        )?;
         crate::cuda_sync()?;
-        self.logits
-            .download_slice((self.seq_len - 1) * self.vocab_size, self.vocab_size)
+        self.decode_logits.download()
     }
 
     /// Predict the greedy next-token index for the given input context (argmax over final logits).
@@ -1006,9 +1068,9 @@ impl StaticGPT2 {
     }
 
 
-    /// Forward kernel dispatch pass across embeddings, all transformer blocks, final layernorm,
-    /// and lm_head projection. Resulting logits reside on device in `self.logits`.
-    fn forward_inner(&mut self) -> Result<()> {
+    /// Forward kernel dispatch pass across embeddings, all transformer blocks, and final layernorm.
+    /// Does not project full logits, maintaining linear memory scaling and avoiding VRAM spikes.
+    fn forward_inner_features(&mut self) -> Result<()> {
         let scale = (self.d_model as f32 / self.n_heads as f32).powf(-0.5);
 
         // Embeddings
@@ -1081,7 +1143,7 @@ impl StaticGPT2 {
             la.x_mid.add_into(&la.mlp_out, &mut self.x_in[l + 1])?;
         }
 
-        // Final LayerNorm + LM head
+        // Final LayerNorm
         self.x_in[self.n_layers].layernorm_into(
             Some(&self.ln_f_gamma),
             Some(&self.ln_f_beta),
@@ -1089,49 +1151,61 @@ impl StaticGPT2 {
             &mut self.ln_f_mean,
             &mut self.ln_f_rstd,
         )?;
-        self.ln_f_out
-            .linear_into(&self.lm_head, None, &mut self.logits)?;
 
         Ok(())
     }
 
     fn step_inner(&mut self) -> Result<f32> {
         // ---------------------------------------------------------------
-        // FORWARD PASS
+        // FORWARD PASS (up to final LayerNorm)
         // ---------------------------------------------------------------
-        self.forward_inner()?;
+        self.forward_inner_features()?;
 
-        // Cross-entropy loss (in-place zero allocation)
-        DeviceTensor::cross_entropy_device_targets(
-            &self.logits,
-            &self.d_target_indices,
-            &mut self.probs,
-            &mut self.loss_tensor,
-        )?;
+        // ---------------------------------------------------------------
+        // CHUNKED CROSS-ENTROPY LOSS & LM HEAD BACKWARD
+        // ---------------------------------------------------------------
+        self.loss_tensor.zero_()?;
+
+        let mut start = 0;
+        let mut is_first = true;
+        while start < self.seq_len {
+            let chunk_len = (self.seq_len - start).min(self.chunk_size);
+            DeviceTensor::linear_slice_into(
+                &self.ln_f_out,
+                start,
+                chunk_len,
+                &self.lm_head,
+                &mut self.chunk_logits,
+            )?;
+            DeviceTensor::fused_chunked_logit_ce(
+                &mut self.chunk_logits,
+                &self.d_target_indices,
+                start,
+                chunk_len,
+                self.seq_len,
+                &mut self.chunk_d_logits,
+                &mut self.loss_tensor,
+            )?;
+            DeviceTensor::linear_backward_chunk_into(
+                &self.ln_f_out,
+                start,
+                chunk_len,
+                &self.lm_head,
+                &self.chunk_d_logits,
+                &mut self.d_ln_f_out,
+                &mut self.d_lm_head,
+                is_first,
+            )?;
+            is_first = false;
+            start += chunk_len;
+        }
+
         self.loss_tensor
             .async_download_scalar_f32(&self.pinned_loss)?;
 
         // ---------------------------------------------------------------
         // BACKWARD PASS
         // ---------------------------------------------------------------
-        // dlogits from cross-entropy
-        DeviceTensor::cross_entropy_backward_device_targets(
-            &self.probs,
-            &self.d_target_indices,
-            &self.grad_one,
-            &mut self.d_logits,
-        )?;
-
-        // LM head backward: d(ln_f_out), d(lm_head)
-        DeviceTensor::linear_backward_into(
-            &self.ln_f_out,
-            &self.lm_head,
-            &self.d_logits,
-            &mut self.d_ln_f_out,
-            &mut self.d_lm_head,
-            None,
-        )?;
-
         // Final LayerNorm backward
         DeviceTensor::layernorm_backward_into(
             &self.d_ln_f_out,
@@ -1150,38 +1224,39 @@ impl StaticGPT2 {
             let lw = &self.layers[l];
             let la = &self.layer_acts[l];
             let lg = &mut self.layer_grads[l];
+            let scratch = &mut self.bwd_scratch;
 
             // --- MLP backward ---
-            lg.d_mlp_out.copy_from(&self.dx_comb)?;
-            lg.dx.copy_from(&self.dx_comb)?;
-            let d_x_mid_from_above = &mut lg.dx;
+            scratch.d_mlp_out.copy_from(&self.dx_comb)?;
+            scratch.dx.copy_from(&self.dx_comb)?;
+            let d_x_mid_from_above = &mut scratch.dx;
 
             // w2 backward: d(mlp_a), d(w2), d(b2)
             DeviceTensor::linear_backward_into(
                 &la.mlp_a,
                 &lw.w2,
-                &lg.d_mlp_out,
-                &mut lg.d_mlp_a,
+                &scratch.d_mlp_out,
+                &mut scratch.d_mlp_a,
                 &mut lg.d_w2,
                 Some(&mut lg.d_b2),
             )?;
 
             // gelu backward: d(mlp_h)
-            la.mlp_h.gelu_backward_into(&lg.d_mlp_a, &mut lg.d_mlp_h)?;
+            la.mlp_h.gelu_backward_into(&scratch.d_mlp_a, &mut scratch.d_mlp_h)?;
 
             // w1 backward: d(ln2_out), d(w1), d(b1)
             DeviceTensor::linear_backward_into(
                 &la.ln2_out,
                 &lw.w1,
-                &lg.d_mlp_h,
-                &mut lg.d_ln2_out,
+                &scratch.d_mlp_h,
+                &mut scratch.d_ln2_out,
                 &mut lg.d_w1,
                 Some(&mut lg.d_b1),
             )?;
 
             // LayerNorm 2 backward into d_x_mid (accumulated in dx_comb)
             DeviceTensor::layernorm_backward_into(
-                &lg.d_ln2_out,
+                &scratch.d_ln2_out,
                 &la.x_mid,
                 Some(&lw.ln2_gamma),
                 &la.ln2_mean,
@@ -1195,13 +1270,13 @@ impl StaticGPT2 {
             d_x_mid_from_above.add_inplace(&self.dx_comb)?;
 
             // --- Attention backward ---
-            lg.d_proj_out.copy_from(d_x_mid_from_above)?;
+            scratch.d_proj_out.copy_from(d_x_mid_from_above)?;
             // Output projection backward: d(attn_out), d(wo), d(bo)
             DeviceTensor::linear_backward_into(
                 &la.attn_out,
                 &lw.wo,
-                &lg.d_proj_out,
-                &mut lg.d_attn_out,
+                &scratch.d_proj_out,
+                &mut scratch.d_attn_out,
                 &mut lg.d_wo,
                 Some(&mut lg.d_bo),
             )?;
@@ -1211,20 +1286,20 @@ impl StaticGPT2 {
                 &la.q,
                 &la.k,
                 &la.v,
-                &lg.d_attn_out,
+                &scratch.d_attn_out,
                 scale,
                 true,
-                &mut lg.d_q,
-                &mut lg.d_k,
-                &mut lg.d_v,
+                &mut scratch.d_q,
+                &mut scratch.d_k,
+                &mut scratch.d_v,
             )?;
 
             // Q proj backward into d_ln1_out (beta = 0.0)
             DeviceTensor::linear_backward_into(
                 &la.ln1_out,
                 &lw.wq,
-                &lg.d_q,
-                &mut lg.d_ln1_out,
+                &scratch.d_q,
+                &mut scratch.d_ln1_out,
                 &mut lg.d_wq,
                 Some(&mut lg.d_bq),
             )?;
@@ -1233,8 +1308,8 @@ impl StaticGPT2 {
             DeviceTensor::linear_backward_accumulate_into(
                 &la.ln1_out,
                 &lw.wk,
-                &lg.d_k,
-                &mut lg.d_ln1_out,
+                &scratch.d_k,
+                &mut scratch.d_ln1_out,
                 &mut lg.d_wk,
                 Some(&mut lg.d_bk),
             )?;
@@ -1243,15 +1318,15 @@ impl StaticGPT2 {
             DeviceTensor::linear_backward_accumulate_into(
                 &la.ln1_out,
                 &lw.wv,
-                &lg.d_v,
-                &mut lg.d_ln1_out,
+                &scratch.d_v,
+                &mut scratch.d_ln1_out,
                 &mut lg.d_wv,
                 Some(&mut lg.d_bv),
             )?;
 
             // LayerNorm 1 backward into self.dx_comb
             DeviceTensor::layernorm_backward_into(
-                &lg.d_ln1_out,
+                &scratch.d_ln1_out,
                 &self.x_in[l],
                 Some(&lw.ln1_gamma),
                 &la.ln1_mean,
@@ -1261,8 +1336,8 @@ impl StaticGPT2 {
                 Some(&mut lg.d_ln1_beta),
             )?;
 
-            // Combine dx for x_in[l]: dx_comb = d_x_in_from_residual (in lg.dx) + d_x_in_from_ln1
-            self.dx_comb.add_inplace(&lg.dx)?;
+            // Combine dx for x_in[l]: dx_comb = d_x_in_from_residual (in scratch.dx) + d_x_in_from_ln1
+            self.dx_comb.add_inplace(&scratch.dx)?;
         }
 
         // Embedding backward — self.dx_comb holds d(x_in[0]) after transformer loop
@@ -2037,39 +2112,43 @@ impl StaticGPT2 {
                 &mut self.ln_f_rstd,
             )?;
         });
-        prof!("lm head linear", {
-            self.ln_f_out
-                .linear_into(&self.lm_head, None, &mut self.logits)?;
-        });
-        prof!("cross-entropy forward", {
-            DeviceTensor::cross_entropy_device_targets(
-                &self.logits,
-                &self.d_target_indices,
-                &mut self.probs,
-                &mut self.loss_tensor,
-            )?;
+        self.loss_tensor.zero_()?;
+        prof!("chunked ce & lm head backward", {
+            let mut start = 0;
+            let mut is_first = true;
+            while start < self.seq_len {
+                let chunk_len = (self.seq_len - start).min(self.chunk_size);
+                DeviceTensor::linear_slice_into(
+                    &self.ln_f_out,
+                    start,
+                    chunk_len,
+                    &self.lm_head,
+                    &mut self.chunk_logits,
+                )?;
+                DeviceTensor::fused_chunked_logit_ce(
+                    &mut self.chunk_logits,
+                    &self.d_target_indices,
+                    start,
+                    chunk_len,
+                    self.seq_len,
+                    &mut self.chunk_d_logits,
+                    &mut self.loss_tensor,
+                )?;
+                DeviceTensor::linear_backward_chunk_into(
+                    &self.ln_f_out,
+                    start,
+                    chunk_len,
+                    &self.lm_head,
+                    &self.chunk_d_logits,
+                    &mut self.d_ln_f_out,
+                    &mut self.d_lm_head,
+                    is_first,
+                )?;
+                is_first = false;
+                start += chunk_len;
+            }
             self.loss_tensor
                 .async_download_scalar_f32(&self.pinned_loss)?;
-        });
-
-        // --- BACKWARD ---
-        prof!("cross-entropy backward", {
-            DeviceTensor::cross_entropy_backward_device_targets(
-                &self.probs,
-                &self.d_target_indices,
-                &self.grad_one,
-                &mut self.d_logits,
-            )?;
-        });
-        prof!("lm head backward", {
-            DeviceTensor::linear_backward_into(
-                &self.ln_f_out,
-                &self.lm_head,
-                &self.d_logits,
-                &mut self.d_ln_f_out,
-                &mut self.d_lm_head,
-                None,
-            )?;
         });
         prof!("final layernorm backward", {
             DeviceTensor::layernorm_backward_into(
@@ -2090,30 +2169,31 @@ impl StaticGPT2 {
             let lw = &self.layers[l];
             let la = &self.layer_acts[l];
             let lg = &mut self.layer_grads[l];
+            let scratch = &mut self.bwd_scratch;
 
-            lg.d_mlp_out.copy_from(&self.dx_comb)?;
-            lg.dx.copy_from(&self.dx_comb)?;
-            let d_x_mid_from_above = &mut lg.dx;
+            scratch.d_mlp_out.copy_from(&self.dx_comb)?;
+            scratch.dx.copy_from(&self.dx_comb)?;
+            let d_x_mid_from_above = &mut scratch.dx;
 
             DeviceTensor::linear_backward_into(
                 &la.mlp_a,
                 &lw.w2,
-                &lg.d_mlp_out,
-                &mut lg.d_mlp_a,
+                &scratch.d_mlp_out,
+                &mut scratch.d_mlp_a,
                 &mut lg.d_w2,
                 Some(&mut lg.d_b2),
             )?;
-            la.mlp_h.gelu_backward_into(&lg.d_mlp_a, &mut lg.d_mlp_h)?;
+            la.mlp_h.gelu_backward_into(&scratch.d_mlp_a, &mut scratch.d_mlp_h)?;
             DeviceTensor::linear_backward_into(
                 &la.ln2_out,
                 &lw.w1,
-                &lg.d_mlp_h,
-                &mut lg.d_ln2_out,
+                &scratch.d_mlp_h,
+                &mut scratch.d_ln2_out,
                 &mut lg.d_w1,
                 Some(&mut lg.d_b1),
             )?;
             DeviceTensor::layernorm_backward_into(
-                &lg.d_ln2_out,
+                &scratch.d_ln2_out,
                 &la.x_mid,
                 Some(&lw.ln2_gamma),
                 &la.ln2_mean,
@@ -2123,12 +2203,12 @@ impl StaticGPT2 {
                 Some(&mut lg.d_ln2_beta),
             )?;
             d_x_mid_from_above.add_inplace(&self.dx_comb)?;
-            lg.d_proj_out.copy_from(d_x_mid_from_above)?;
+            scratch.d_proj_out.copy_from(d_x_mid_from_above)?;
             DeviceTensor::linear_backward_into(
                 &la.attn_out,
                 &lw.wo,
-                &lg.d_proj_out,
-                &mut lg.d_attn_out,
+                &scratch.d_proj_out,
+                &mut scratch.d_attn_out,
                 &mut lg.d_wo,
                 Some(&mut lg.d_bo),
             )?;
@@ -2136,39 +2216,39 @@ impl StaticGPT2 {
                 &la.q,
                 &la.k,
                 &la.v,
-                &lg.d_attn_out,
+                &scratch.d_attn_out,
                 scale,
                 true,
-                &mut lg.d_q,
-                &mut lg.d_k,
-                &mut lg.d_v,
+                &mut scratch.d_q,
+                &mut scratch.d_k,
+                &mut scratch.d_v,
             )?;
             DeviceTensor::linear_backward_into(
                 &la.ln1_out,
                 &lw.wq,
-                &lg.d_q,
-                &mut lg.d_ln1_out,
+                &scratch.d_q,
+                &mut scratch.d_ln1_out,
                 &mut lg.d_wq,
                 Some(&mut lg.d_bq),
             )?;
             DeviceTensor::linear_backward_accumulate_into(
                 &la.ln1_out,
                 &lw.wk,
-                &lg.d_k,
-                &mut lg.d_ln1_out,
+                &scratch.d_k,
+                &mut scratch.d_ln1_out,
                 &mut lg.d_wk,
                 Some(&mut lg.d_bk),
             )?;
             DeviceTensor::linear_backward_accumulate_into(
                 &la.ln1_out,
                 &lw.wv,
-                &lg.d_v,
-                &mut lg.d_ln1_out,
+                &scratch.d_v,
+                &mut scratch.d_ln1_out,
                 &mut lg.d_wv,
                 Some(&mut lg.d_bv),
             )?;
             DeviceTensor::layernorm_backward_into(
-                &lg.d_ln1_out,
+                &scratch.d_ln1_out,
                 &self.x_in[l],
                 Some(&lw.ln1_gamma),
                 &la.ln1_mean,
@@ -2177,7 +2257,7 @@ impl StaticGPT2 {
                 Some(&mut lg.d_ln1_gamma),
                 Some(&mut lg.d_ln1_beta),
             )?;
-            self.dx_comb.add_inplace(&lg.dx)?;
+            self.dx_comb.add_inplace(&scratch.dx)?;
 
             crate::cuda_sync()?;
             println!(

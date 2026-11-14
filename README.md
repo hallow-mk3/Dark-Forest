@@ -29,20 +29,28 @@ All benchmarks were evaluated on local hardware: **NVIDIA GeForce RTX 5070 Lapto
 
 | Sequence Length ($S$) | PyTorch SDPA<br>(bf16 + ckpt)<br>[1] | PyTorch SDPA<br>(bf16 + ckpt + chunked CE)<br>[2] | Dark Forest Static Engine<br>(fp32 + TF32 MMA)<br>[3] | DF Peak VRAM |
 | :---: | :---: | :---: | :---: | :---: |
-| **128** | `54.8 ms` / `2,099 MB` | `55.9 ms` / `2,100 MB` | `38.84 ms` | `3,320 MB` |
+| **128** | `54.8 ms` / `2,099 MB` | `55.9 ms` / `2,100 MB` | `51.06 ms` | `3,170 MB` |
 | **256** | `55.2 ms` / `2,109 MB` | `53.9 ms` / `2,112 MB` | — | — |
-| **512** | `56.1 ms` / `2,134 MB` | `60.3 ms` / `2,139 MB` | `112.62 ms` | `4,458 MB` |
-| **1,024** | `75.9 ms` / `2,179 MB` | `78.2 ms` / `2,185 MB` | `320.37 ms` | `6,862 MB` |
-| **2,048** | `125.7 ms` / `2,481 MB` | `122.4 ms` / `2,196 MB` | **OOM (>6.74 GB, 85% safety cap)** | `7,013 MB` |
-| **4,096** | `279.1 ms` / `3,706 MB` | `255.9 ms` / `2,836 MB` | **OOM** | — |
-| **8,192** | `698.6 ms` / `6,151 MB` | `668.3 ms` / `4,117 MB` | **OOM** | — |
+| **512** | `56.1 ms` / `2,134 MB` | `60.3 ms` / `2,139 MB` | `185.16 ms` | `3,694 MB` |
+| **1,024** | `75.9 ms` / `2,179 MB` | `78.2 ms` / `2,185 MB` | `380.78 ms` | `4,182 MB` |
+| **2,048** | `125.7 ms` / `2,481 MB` | `122.4 ms` / `2,196 MB` | `849.60 ms` | `4,832 MB` |
+| **4,096** | `279.1 ms` / `3,706 MB` | `255.9 ms` / `2,836 MB` | `2652.66 ms` | `6,751 MB` |
+| **8,192** | `698.6 ms` / `6,151 MB` | `668.3 ms` / `4,117 MB` | **OOM (>6.74 GB, 85% safety cap)** | `7,013 MB` |
 | **16,384** | **OOM (>6.74 GB, 85% safety cap)** | `1968.2 ms` / `6,678 MB` | **OOM** | — |
 | **32,768** | **OOM** | **OOM (>6.74 GB, 85% safety cap)** | **OOM** | — |
 
-#### Measurement and Configuration Notes:
-- **[1] PyTorch SDPA (bf16 + ckpt)**: Uses `torch.nn.functional.scaled_dot_product_attention`, bfloat16 mixed precision, and gradient checkpointing. It materializes full logits for unchunked cross-entropy. At $S = 16{,}384$, logit allocation exceeds the 85% memory cap (6.74 GB).
-- **[2] PyTorch SDPA (+ chunked CE)**: Chunks the LM head projection and cross-entropy loss calculation (chunk size 1,024) to avoid materializing the $[S, 50257]$ logits tensor. Extends survival horizon to $S = 16{,}384$ before exceeding the 85% cap at $S = 32{,}768$.
-- **[3] Dark Forest Static Engine**: Operates in Float32 with hardware TF32 Tensor Core MMA enabled. It preallocates all layer activation buffers without gradient checkpointing, storing unchunked $[S, 50257]$ logits, probabilities, and gradient buffers. Memory scales statically with sequence length, reaching the 85% safety cap at $S = 2{,}048$.
+#### Performance and Memory Analysis:
+Dark Forest now scales reliably up to $S = 4{,}096$ within the 85% safety cap (6.74 GB) on an 8 GB Laptop GPU, enabled by fused chunked cross-entropy, shared backward activation scratch, and per-head attention backward workspace reuse:
+- **Throughput Comparison**: At $S = 1{,}024$, Dark Forest requires $380.78\text{ ms}$ vs. $75.85\text{ ms}$ for PyTorch SDPA (~5.0x slower). At $S = 4{,}096$, Dark Forest completes in $2652.66\text{ ms}$ vs. $255.9\text{ ms}$ for PyTorch SDPA.
+- **Peak VRAM Comparison**: At $S = 1{,}024$, Dark Forest requires $4,182\text{ MB}$ (down from $6,862\text{ MB}$, a 2.68 GB reduction) vs. $2,179\text{ MB}$ for PyTorch SDPA (~1.9x difference). At $S = 2{,}048$, Dark Forest uses $4,832\text{ MB}$ (well under the 6,743 MB threshold). At $S = 4{,}096$, Dark Forest uses $6,751\text{ MB}$ (surviving under the 85% safety cap).
+- **Context Horizon**: Dark Forest now scales to $S = 4{,}096$ without OOM, quadrupling its previous $S = 1{,}024$ ceiling. PyTorch SDPA reaches $S = 8{,}192$ (and $S = 16{,}384$ with chunked cross-entropy).
+- **Mathematical Parity**: Verified against PyTorch across 5 full backward steps and AdamW updates with initial eval loss $10.81$ vs. theoretical $\ln(50257) = 10.825$ (diff $< 0.00002$).
+
+**Underlying Causes**:
+1. **Precision & Activation Recomputation**: Dark Forest operates in Float32 (TF32 MMA) and pre-allocates layer activation buffers. PyTorch SDPA uses bfloat16 mixed precision and activation recomputation (gradient checkpointing), reducing activation memory from $O(L \cdot S)$ to $O(S)$.
+2. **Chunked Loss & Shared Scratch**: Dark Forest uses fused chunked cross-entropy ($C=512$) and shares backward activation buffers across all 12 transformer layers, saving $>2.6\text{ GB}$ of VRAM at $S=1{,}024$ and enabling $S=2{,}048$ and $S=4{,}096$ to train without OOM.
+3. **Thermal Variance**: Benchmarks were conducted on laptop hardware. Thermal throttling introduces ~10% latency variation across runs (for example, PyTorch SDPA at $S=8{,}192$ measured 631.6 ms in an isolated cold run versus 698.6 ms in a sustained sweep).
+
 - **Parameter Count Accounting**:
   - Dark Forest parameter counts: 162.35M ($S=128$), 162.64M ($S=512$), 163.04M ($S=1024$), 163.82M ($S=2048$). Dark Forest allocates position embeddings sized exactly to the active context window.
   - PyTorch benchmark parameter count: 212.50M ($212{,}500{,}224$ parameters). The PyTorch benchmark initialized learned position embeddings for `max_pos = 65,537` ($50.3\text{M}$ parameters) to support the full scaling sweep without reinitialization.
@@ -62,12 +70,11 @@ All benchmarks were evaluated on local hardware: **NVIDIA GeForce RTX 5070 Lapto
 | **32,768** | `3,782.6 ms` | `384 MB` | 0.4 TFLOP/s | Kernel executed |
 | **65,536** | `23,711.1 ms` | `768 MB` | 0.3 TFLOP/s | Kernel executed |
 | **131,072** | `108,989.4 ms` | `1,536 MB` | 0.2 TFLOP/s | Kernel executed |
-| **262,144** | *Not timed* | `3,072 MB` | — | Allocation verified only |
-| **524,288** | *Not timed* | `6,144 MB` | — | Allocation verified only |
-| **1,048,576** | *Not timed* | `7,013 MB` | — | Capped at free device VRAM |
-| **2,097,152** | *Not timed* | `7,013 MB` | — | Exceeds 8 GB capacity ($24.6\text{ GB}$ required) |
 
-*For derivation of theoretical working-set sizes, KV-cache requirements at 2M tokens, and OOM boundaries, refer to [docs/LONG_CONTEXT_DERIVATION.md](file:///c:/Users/swast/Entropy/Dark-Forest/docs/LONG_CONTEXT_DERIVATION.md).*
+#### Kernel Benchmark Observations:
+- **Memory Parity with PyTorch**: On identical shapes and precision ($B=1, H=12, d_{\text{head}}=64, S=8192$, Float32), PyTorch SDPA also allocates 96 MB forward. The two runtimes tie in isolated memory footprint.
+- **Compute Throughput**: Measured kernel throughput of 0.2–0.5 TFLOP/s is slow compared to hardware limits (specialized production kernels achieve tens of TFLOP/s on modern Tensor Cores).
+- **Omission of $S \ge 262{,}144$**: Probes at $S \ge 262{,}144$ are omitted because the kernel was never executed at those sequence lengths. Probed allocations above 1M hit the device free memory ceiling (7,013 MB) where full tensor allocation would require 12.3 GB to 24.6 GB. For full theoretical derivations, see [docs/LONG_CONTEXT_DERIVATION.md](file:///c:/Users/swast/Entropy/Dark-Forest/docs/LONG_CONTEXT_DERIVATION.md).
 
 ---
 

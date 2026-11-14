@@ -528,6 +528,77 @@ pub fn cuda_fused_logit_ce(
     Err(anyhow::Error::msg("CUDA kernels not compiled"))
 }
 
+pub fn cuda_fused_chunked_logit_ce(
+    logits: *mut f32,
+    targets: *const u32,
+    grad_logits: *mut f32,
+    loss: *mut f32,
+    chunk_rows: usize,
+    cols: usize,
+    total_rows: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_fused_chunked_logit_ce(
+                logits: *mut f32,
+                targets: *const u32,
+                grad_logits: *mut f32,
+                loss: *mut f32,
+                chunk_rows: u32,
+                cols: u32,
+                total_rows: u32,
+            );
+        }
+        launch_fused_chunked_logit_ce(
+            logits,
+            targets,
+            grad_logits,
+            loss,
+            chunk_rows as u32,
+            cols as u32,
+            total_rows as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+pub fn cuda_chunked_ce_eval(
+    logits: *mut f32,
+    targets: *const u32,
+    loss: *mut f32,
+    chunk_rows: usize,
+    cols: usize,
+    total_rows: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_chunked_ce_eval(
+                logits: *mut f32,
+                targets: *const u32,
+                loss: *mut f32,
+                chunk_rows: u32,
+                cols: u32,
+                total_rows: u32,
+            );
+        }
+        launch_chunked_ce_eval(
+            logits,
+            targets,
+            loss,
+            chunk_rows as u32,
+            cols as u32,
+            total_rows as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
 /// LayerNorm on device.
 pub fn cuda_layernorm(
     x: *const f32,
