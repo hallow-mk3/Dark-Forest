@@ -64,52 +64,54 @@ __global__ void kernel_fused_mha_fwd_tiled(
   uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
   const float *q_ptr = Q + (size_t)q_idx * d_model + head_offset;
 
-  // Preload Q values into registers to avoid reloading Q in every step of the
-  // key loop
-  float q_val[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
-       d += blockDim.x, ++lane) {
-    q_val[lane] = __ldg(&q_ptr[d]);
-  }
+  // Preload Q values into registers for d_head=64 (2 slots: tid_d and tid_d+32)
+  float q_0 = (tid_d < d_head) ? __ldg(&q_ptr[tid_d]) : 0.0f;
+  float q_1 = (tid_d + 32 < d_head) ? __ldg(&q_ptr[tid_d + 32]) : 0.0f;
 
-  // o_acc: MAX_DHEAD/blockDim.x = 128/32 = 4 register slots per lane
-  float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float o_acc_0 = 0.0f;
+  float o_acc_1 = 0.0f;
 
   for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
     const float *k_ptr = K + (size_t)k_idx * d_model + head_offset;
     const float *v_ptr = V + (size_t)k_idx * d_model + head_offset;
 
-    // Compute Q . K across arbitrary d_head using cached Q in registers
-    float partial_dot = 0.0f;
-    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
-         d += blockDim.x, ++lane) {
-      partial_dot = fmaf(q_val[lane], __ldg(&k_ptr[d]), partial_dot);
+    // Dot product Q . K unrolled in registers
+    float k_0 = (tid_d < d_head) ? __ldg(&k_ptr[tid_d]) : 0.0f;
+    float k_1 = (tid_d + 32 < d_head) ? __ldg(&k_ptr[tid_d + 32]) : 0.0f;
+    float partial_dot = q_0 * k_0;
+    if (tid_d + 32 < d_head) {
+      partial_dot += q_1 * k_1;
     }
+
     float dot_val = warp_reduce_sum(partial_dot);
-    dot_val = __shfl_sync(0xffffffff, dot_val,
-                          0); // Broadcast full dot product to all lanes
+    dot_val = __shfl_sync(0xffffffff, dot_val, 0);
     float score = dot_val * scale;
 
-    float m_prev = m_i;
-    float m_new = fmaxf(m_prev, score);
-    float alpha = (m_prev == -FLT_MAX) ? 0.0f : __expf(m_prev - m_new);
-    float p = __expf(score - m_new);
+    float v_0 = (tid_d < d_head) ? __ldg(&v_ptr[tid_d]) : 0.0f;
+    float v_1 = (tid_d + 32 < d_head) ? __ldg(&v_ptr[tid_d + 32]) : 0.0f;
 
-    l_i = fmaf(l_i, alpha, p);
-    m_i = m_new;
-
-    // Accumulate V values across d using hardware FMA
-    for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
-         d += blockDim.x, ++lane) {
-      o_acc[lane] = fmaf(p, __ldg(&v_ptr[d]), o_acc[lane] * alpha);
+    // Online softmax with exactly 1 exponential call per key
+    if (score > m_i) {
+      float alpha = (m_i == -FLT_MAX) ? 0.0f : __expf(m_i - score);
+      m_i = score;
+      l_i = l_i * alpha + 1.0f;
+      o_acc_0 = o_acc_0 * alpha + v_0;
+      o_acc_1 = o_acc_1 * alpha + v_1;
+    } else {
+      float p = __expf(score - m_i);
+      l_i += p;
+      o_acc_0 += p * v_0;
+      o_acc_1 += p * v_1;
     }
   }
 
   float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
   float *out_ptr = Out + (size_t)q_idx * d_model + head_offset;
-  for (uint32_t d = tid_d, lane = 0; d < d_head && lane < 4;
-       d += blockDim.x, ++lane) {
-    out_ptr[d] = o_acc[lane] * inv_l;
+  if (tid_d < d_head) {
+    out_ptr[tid_d] = o_acc_0 * inv_l;
+  }
+  if (tid_d + 32 < d_head) {
+    out_ptr[tid_d + 32] = o_acc_1 * inv_l;
   }
 }
 
@@ -343,32 +345,25 @@ extern "C" void launch_attention_backward(const float *q, const float *k,
 // Block: (32, 4) — 128 threads per block
 // ---------------------------------------------------------------------------
 __global__ void kernel_mha_bwd_all_heads(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    const float* __restrict__ dOut,
-    float* __restrict__ dQ,
-    float* __restrict__ dK,
-    float* __restrict__ dV,
-    float* __restrict__ probabilities,
-    uint32_t n_heads,
-    uint32_t seq_len,
-    uint32_t d_head,
-    float scale,
-    uint32_t is_causal
-) {
-    uint32_t h = blockIdx.y;
-    uint32_t tid_d = threadIdx.x; // [0..31]
-    uint32_t tid_q = threadIdx.y; // [0..3]
-    uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
+    const float *__restrict__ Q, const float *__restrict__ K,
+    const float *__restrict__ V, const float *__restrict__ dOut,
+    float *__restrict__ dQ, float *__restrict__ dK, float *__restrict__ dV,
+    float *__restrict__ probabilities, uint32_t n_heads, uint32_t seq_len,
+    uint32_t d_head, float scale, uint32_t is_causal) {
+  uint32_t h = blockIdx.y;
+  uint32_t tid_d = threadIdx.x; // [0..31]
+  uint32_t tid_q = threadIdx.y; // [0..3]
+  uint32_t q_idx = blockIdx.x * blockDim.y + tid_q;
 
-    if (h >= n_heads || q_idx >= seq_len) return;
+  if (h >= n_heads || q_idx >= seq_len)
+    return;
 
-    uint32_t d_model = n_heads * d_head;
-    uint32_t head_offset = h * d_head;
-    size_t head_prob_offset = (size_t)h * 2 * seq_len * seq_len;
-    float* prob_row    = probabilities + head_prob_offset + (size_t)q_idx * seq_len;
-    float* d_score_row = probabilities + head_prob_offset + (size_t)seq_len * seq_len + (size_t)q_idx * seq_len;
+  uint32_t d_model = n_heads * d_head;
+  uint32_t head_offset = h * d_head;
+  size_t head_prob_offset = (size_t)h * 2 * seq_len * seq_len;
+  float *prob_row = probabilities + head_prob_offset + (size_t)q_idx * seq_len;
+  float *d_score_row = probabilities + head_prob_offset +
+                       (size_t)seq_len * seq_len + (size_t)q_idx * seq_len;
 
   uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
 
@@ -485,13 +480,12 @@ extern "C" void launch_fused_mha_backward(
   cudaMemsetAsync(d_k, 0, gradient_bytes);
   cudaMemsetAsync(d_v, 0, gradient_bytes);
 
-    dim3 block_dim(32, 4); // 32 lanes for d dimension, 4 query tokens per block
-    dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y, n_heads);
+  dim3 block_dim(32, 4); // 32 lanes for d dimension, 4 query tokens per block
+  dim3 grid_dim((seq_len + block_dim.y - 1) / block_dim.y, n_heads);
 
-    kernel_mha_bwd_all_heads<<<grid_dim, block_dim>>>(
-        q, k, v, d_out, d_q, d_k, d_v, probabilities,
-        n_heads, seq_len, d_head, scale, causal
-    );
+  kernel_mha_bwd_all_heads<<<grid_dim, block_dim>>>(
+      q, k, v, d_out, d_q, d_k, d_v, probabilities, n_heads, seq_len, d_head,
+      scale, causal);
 }
 
 // ---------------------------------------------------------------------------

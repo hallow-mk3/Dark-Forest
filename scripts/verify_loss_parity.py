@@ -11,7 +11,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import darkforest
-
 class PyTorchGPT2(nn.Module):
     def __init__(self, vocab_size, d_model, n_heads, n_layers, d_ff, seq_len):
         super().__init__()

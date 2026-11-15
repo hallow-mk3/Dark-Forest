@@ -46,14 +46,12 @@ struct LayerActivations {
     k: DeviceTensor,        // [seq, d_model]
     v: DeviceTensor,        // [seq, d_model]
     attn_out: DeviceTensor, // [seq, d_model]
-    proj_out: DeviceTensor, // [seq, d_model]
     x_mid: DeviceTensor,    // [seq, d_model]  (x after attn residual)
     ln2_out: DeviceTensor,  // [seq, d_model]
     ln2_mean: DeviceTensor, // [seq]
     ln2_rstd: DeviceTensor, // [seq]
     mlp_h: DeviceTensor,    // [seq, d_ff]
     mlp_a: DeviceTensor,    // [seq, d_ff]  (after gelu)
-    mlp_out: DeviceTensor,  // [seq, d_model]
 }
 
 /// Global scratch buffers for backward pass across all transformer layers.
@@ -64,12 +62,10 @@ struct LayerBackwardScratch {
     // Upstream gradient flowing into layer
     dx: DeviceTensor, // [seq, d_model]
     // MLP backward intermediate gradients
-    d_mlp_out: DeviceTensor, // [seq, d_model]
     d_mlp_a: DeviceTensor,   // [seq, d_ff]
     d_mlp_h: DeviceTensor,   // [seq, d_ff]
     d_ln2_out: DeviceTensor, // [seq, d_model]
     // Attention backward intermediate gradients
-    d_proj_out: DeviceTensor, // [seq, d_model]
     d_attn_out: DeviceTensor, // [seq, d_model]
     d_q: DeviceTensor,        // [seq, d_model]
     d_k: DeviceTensor,        // [seq, d_model]
@@ -154,6 +150,7 @@ pub struct StaticGPT2 {
     chunk_size: usize,
     chunk_logits: DeviceTensor,   // [chunk_size, vocab_size]
     chunk_d_logits: DeviceTensor, // [chunk_size, vocab_size]
+    fwd_intermediate: DeviceTensor, // [seq, d_model] shared intermediate projection scratch
     bwd_scratch: LayerBackwardScratch,
 
     // Pinned host buffer for async loss D2H (no CPU-GPU sync inside step)
@@ -373,14 +370,12 @@ impl StaticGPT2 {
                 k: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 v: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 attn_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
-                proj_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 x_mid: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 ln2_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
                 ln2_mean: DeviceTensor::zeros(vec![seq_len])?,
                 ln2_rstd: DeviceTensor::zeros(vec![seq_len])?,
                 mlp_h: DeviceTensor::zeros(vec![seq_len, d_ff])?,
                 mlp_a: DeviceTensor::zeros(vec![seq_len, d_ff])?,
-                mlp_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             });
 
             // Pre-allocate parameter gradient buffers (intermediate activations shared in bwd_scratch)
@@ -414,11 +409,9 @@ impl StaticGPT2 {
         // Shared backward scratch across all layers (allocated ONCE)
         let bwd_scratch = LayerBackwardScratch {
             dx: DeviceTensor::zeros(vec![seq_len, d_model])?,
-            d_mlp_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             d_mlp_a: DeviceTensor::zeros(vec![seq_len, d_ff])?,
             d_mlp_h: DeviceTensor::zeros(vec![seq_len, d_ff])?,
             d_ln2_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
-            d_proj_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             d_attn_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
             d_q: DeviceTensor::zeros(vec![seq_len, d_model])?,
             d_k: DeviceTensor::zeros(vec![seq_len, d_model])?,
@@ -510,6 +503,7 @@ impl StaticGPT2 {
             chunk_size,
             chunk_logits,
             chunk_d_logits,
+            fwd_intermediate: DeviceTensor::zeros(vec![seq_len, d_model])?,
             bwd_scratch,
             d_lm_head: DeviceTensor::zeros(vec![vocab_size, d_model])?,
             d_ln_f_out: DeviceTensor::zeros(vec![seq_len, d_model])?,
@@ -1122,8 +1116,8 @@ impl StaticGPT2 {
 
             // Output projection + first residual
             la.attn_out
-                .linear_into(&lw.wo, Some(&lw.bo), &mut la.proj_out)?;
-            self.x_in[l].add_into(&la.proj_out, &mut la.x_mid)?;
+                .linear_into(&lw.wo, Some(&lw.bo), &mut self.fwd_intermediate)?;
+            self.x_in[l].add_into(&self.fwd_intermediate, &mut la.x_mid)?;
 
             // LayerNorm 2
             la.x_mid.layernorm_into(
@@ -1139,10 +1133,10 @@ impl StaticGPT2 {
                 .linear_into(&lw.w1, Some(&lw.b1), &mut la.mlp_h)?;
             la.mlp_h.gelu_into(&mut la.mlp_a)?;
             la.mlp_a
-                .linear_into(&lw.w2, Some(&lw.b2), &mut la.mlp_out)?;
+                .linear_into(&lw.w2, Some(&lw.b2), &mut self.fwd_intermediate)?;
 
             // Second residual
-            la.x_mid.add_into(&la.mlp_out, &mut self.x_in[l + 1])?;
+            la.x_mid.add_into(&self.fwd_intermediate, &mut self.x_in[l + 1])?;
         }
 
         // Final LayerNorm
@@ -1229,15 +1223,14 @@ impl StaticGPT2 {
             let scratch = &mut self.bwd_scratch;
 
             // --- MLP backward ---
-            scratch.d_mlp_out.copy_from(&self.dx_comb)?;
             scratch.dx.copy_from(&self.dx_comb)?;
             let d_x_mid_from_above = &mut scratch.dx;
 
-            // w2 backward: d(mlp_a), d(w2), d(b2)
+            // w2 backward: d(mlp_a), d(w2), d(b2) directly using self.dx_comb as upstream grad
             DeviceTensor::linear_backward_into(
                 &la.mlp_a,
                 &lw.w2,
-                &scratch.d_mlp_out,
+                &self.dx_comb,
                 &mut scratch.d_mlp_a,
                 &mut lg.d_w2,
                 Some(&mut lg.d_b2),
@@ -1272,12 +1265,11 @@ impl StaticGPT2 {
             d_x_mid_from_above.add_inplace(&self.dx_comb)?;
 
             // --- Attention backward ---
-            scratch.d_proj_out.copy_from(d_x_mid_from_above)?;
-            // Output projection backward: d(attn_out), d(wo), d(bo)
+            // Output projection backward: d(attn_out), d(wo), d(bo) directly using d_x_mid_from_above
             DeviceTensor::linear_backward_into(
                 &la.attn_out,
                 &lw.wo,
-                &scratch.d_proj_out,
+                d_x_mid_from_above,
                 &mut scratch.d_attn_out,
                 &mut lg.d_wo,
                 Some(&mut lg.d_bo),
@@ -2045,8 +2037,8 @@ impl StaticGPT2 {
             {
                 let t = Instant::now();
                 la.attn_out
-                    .linear_into(&lw.wo, Some(&lw.bo), &mut la.proj_out)?;
-                self.x_in[l].add_into(&la.proj_out, &mut la.x_mid)?;
+                    .linear_into(&lw.wo, Some(&lw.bo), &mut self.fwd_intermediate)?;
+                self.x_in[l].add_into(&self.fwd_intermediate, &mut la.x_mid)?;
                 crate::cuda_sync()?;
                 println!(
                     "  {:50} {:7.3} ms",
@@ -2094,8 +2086,8 @@ impl StaticGPT2 {
             {
                 let t = Instant::now();
                 la.mlp_a
-                    .linear_into(&lw.w2, Some(&lw.b2), &mut la.mlp_out)?;
-                la.x_mid.add_into(&la.mlp_out, &mut self.x_in[l + 1])?;
+                    .linear_into(&lw.w2, Some(&lw.b2), &mut self.fwd_intermediate)?;
+                la.x_mid.add_into(&self.fwd_intermediate, &mut self.x_in[l + 1])?;
                 crate::cuda_sync()?;
                 println!(
                     "  {:50} {:7.3} ms",
@@ -2173,14 +2165,13 @@ impl StaticGPT2 {
             let lg = &mut self.layer_grads[l];
             let scratch = &mut self.bwd_scratch;
 
-            scratch.d_mlp_out.copy_from(&self.dx_comb)?;
             scratch.dx.copy_from(&self.dx_comb)?;
             let d_x_mid_from_above = &mut scratch.dx;
 
             DeviceTensor::linear_backward_into(
                 &la.mlp_a,
                 &lw.w2,
-                &scratch.d_mlp_out,
+                &self.dx_comb,
                 &mut scratch.d_mlp_a,
                 &mut lg.d_w2,
                 Some(&mut lg.d_b2),
@@ -2205,11 +2196,10 @@ impl StaticGPT2 {
                 Some(&mut lg.d_ln2_beta),
             )?;
             d_x_mid_from_above.add_inplace(&self.dx_comb)?;
-            scratch.d_proj_out.copy_from(d_x_mid_from_above)?;
             DeviceTensor::linear_backward_into(
                 &la.attn_out,
                 &lw.wo,
-                &scratch.d_proj_out,
+                d_x_mid_from_above,
                 &mut scratch.d_attn_out,
                 &mut lg.d_wo,
                 Some(&mut lg.d_bo),
