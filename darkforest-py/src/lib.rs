@@ -768,17 +768,19 @@ impl PyEngine {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("generate failed: {e}")))
     }
 
-    #[pyo3(signature = (prompt_tokens, max_new_tokens, temperature=1.0, top_k=50, top_p=0.9, repetition_penalty=1.0, stop_tokens=None))]
+    #[pyo3(signature = (prompt_tokens, max_new_tokens=None, temperature=1.0, top_k=50, top_p=0.9, repetition_penalty=1.0, stop_tokens=None, max_tokens=None))]
     fn generate_fast(
         &mut self,
         prompt_tokens: Vec<usize>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
         temperature: f32,
         top_k: usize,
         top_p: f32,
         repetition_penalty: f32,
         stop_tokens: Option<Vec<usize>>,
+        max_tokens: Option<usize>,
     ) -> PyResult<Vec<usize>> {
+        let n = max_new_tokens.or(max_tokens).unwrap_or(64);
         let cfg = darkforest_core::engine::SamplerConfig {
             temperature,
             top_k,
@@ -787,7 +789,7 @@ impl PyEngine {
             stop_tokens: stop_tokens.unwrap_or_default(),
             min_tokens: 0,
         };
-        self.inner.generate_fast(&prompt_tokens, max_new_tokens, &cfg)
+        self.inner.generate_fast(&prompt_tokens, n, &cfg)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("generate_fast failed: {e}")))
     }
 
