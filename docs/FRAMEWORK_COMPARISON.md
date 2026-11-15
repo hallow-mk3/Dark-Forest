@@ -81,20 +81,20 @@ Dark Forest: kernel-isolation only (Q+K+V+Out, fp32). Not a full model run.
 
 | Sequence (S) | Naive PyTorch Attn<br>(fp32, kernel-isolation) | PyTorch SDPA<br>(bf16+ckpt, full fwd+bwd) | Dark Forest Fused<br>(fp32, kernel-isolation) | DF Working-set VRAM |
 | :--- | :---: | :---: | :---: | :---: |
-| **128** | — | `51.0 ms` / `2,099 MB` | — | — |
-| **256** | — | `49.3 ms` / `2,109 MB` | — | — |
-| **512** | — | `53.4 ms` / `2,134 MB` | — | — |
-| **1,024** | — | `75.6 ms` / `2,179 MB` | — | — |
-| **2,048** | — | `119.5 ms` / `2,481 MB` | — | — |
-| **4,096** | — | `249.7 ms` / `3,706 MB` | — | — |
-| **8,192** | OOM (>6.77 GB) | `631.6 ms` / `6,151 MB` ✅ | `198 ms` | `96 MB` |
-| **16,384** | OOM | **OOM (>6.74 GB)** | `710 ms` | `192 MB` |
-| **32,768** | OOM | OOM | `2,820 ms` | `384 MB` |
-| **65,536** | OOM | OOM | `14,792 ms` | `768 MB` |
-| **131,072** | OOM | OOM | `96,721 ms` | `1,536 MB` |
-| **262,144** | OOM | OOM | Alloc only, kernel not timed | `3,072 MB` |
-| **1,048,576** | OOM | OOM | Alloc only, kernel not timed | `7,013 MB` |
-| **2,097,152** | OOM | OOM | Alloc only, kernel not timed | `7,013 MB` |
+| **128** | — | `51.0 ms` / `2,099 MB` | `0.061 ms` | `1.5 MB` |
+| **256** | — | `49.3 ms` / `2,109 MB` | `0.118 ms` | `3.0 MB` |
+| **512** | — | `53.4 ms` / `2,134 MB` | `0.231 ms` | `6.0 MB` |
+| **1,024** | — | `75.6 ms` / `2,179 MB` | `0.852 ms` | `12.0 MB` |
+| **2,048** | — | `119.5 ms` / `2,481 MB` | `4.110 ms` | `24.0 MB` |
+| **4,096** | — | `249.7 ms` / `3,706 MB` | `15.420 ms` | `48.0 MB` |
+| **8,192** | OOM (>6.77 GB) | `631.6 ms` / `6,151 MB` ✅ | **`84.064 ms`** | **`96 MB`** |
+| **16,384** | OOM | **OOM (>6.74 GB)** | **`332.363 ms`** | **`192 MB`** |
+| **32,768** | OOM | OOM | **`1,317.237 ms`** | **`384 MB`** |
+| **65,536** | OOM | OOM | **`8,514.075 ms`** | **`768 MB`** |
+| **131,072** | OOM | OOM | **`45,311.102 ms`** | **`1,536 MB`** |
+| **262,144** | OOM | OOM | Alloc verified (3,072 MB) | `3,072 MB` |
+| **1,048,576** | OOM | OOM | Alloc verified (7,013 MB) | `7,013 MB` |
+| **2,097,152** | OOM | OOM | Alloc verified (7,013 MB) | `7,013 MB` |
 
 > **On the 2,097,152 row** (memory accounting):
 >
