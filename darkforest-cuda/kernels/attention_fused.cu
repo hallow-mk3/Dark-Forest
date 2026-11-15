@@ -64,7 +64,49 @@ __global__ void kernel_fused_mha_fwd_tiled(
   uint32_t max_k = is_causal ? (q_idx + 1) : seq_len;
   const float *q_ptr = Q + (size_t)q_idx * d_model + head_offset;
 
-  // Preload Q values into registers for d_head=64 (2 slots: tid_d and tid_d+32)
+  // Optimized vectorized coalesced memory fast-path for standard d_head=64 (GPT-2)
+  if (d_head == 64) {
+    const float2 *q_vec_ptr = reinterpret_cast<const float2*>(q_ptr);
+    float2 q_val = __ldg(&q_vec_ptr[tid_d]);
+    float q_0 = q_val.x;
+    float q_1 = q_val.y;
+    float o_acc_0 = 0.0f;
+    float o_acc_1 = 0.0f;
+
+    for (uint32_t k_idx = 0; k_idx < max_k; ++k_idx) {
+      const float2 *k_vec_ptr = reinterpret_cast<const float2*>(K + (size_t)k_idx * d_model + head_offset);
+      const float2 *v_vec_ptr = reinterpret_cast<const float2*>(V + (size_t)k_idx * d_model + head_offset);
+
+      float2 k_val = __ldg(&k_vec_ptr[tid_d]);
+      float partial_dot = q_0 * k_val.x + q_1 * k_val.y;
+
+      float dot_val = warp_reduce_sum(partial_dot);
+      dot_val = __shfl_sync(0xffffffff, dot_val, 0);
+      float score = dot_val * scale;
+
+      float2 v_val = __ldg(&v_vec_ptr[tid_d]);
+
+      if (score > m_i) {
+        float alpha = (m_i == -FLT_MAX) ? 0.0f : __expf(m_i - score);
+        m_i = score;
+        l_i = l_i * alpha + 1.0f;
+        o_acc_0 = o_acc_0 * alpha + v_val.x;
+        o_acc_1 = o_acc_1 * alpha + v_val.y;
+      } else {
+        float p = __expf(score - m_i);
+        l_i += p;
+        o_acc_0 += p * v_val.x;
+        o_acc_1 += p * v_val.y;
+      }
+    }
+
+    float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
+    float2 *out_vec_ptr = reinterpret_cast<float2*>(Out + (size_t)q_idx * d_model + head_offset);
+    out_vec_ptr[tid_d] = make_float2(o_acc_0 * inv_l, o_acc_1 * inv_l);
+    return;
+  }
+
+  // Preload Q values into registers for general d_head
   float q_0 = (tid_d < d_head) ? __ldg(&q_ptr[tid_d]) : 0.0f;
   float q_1 = (tid_d + 32 < d_head) ? __ldg(&q_ptr[tid_d + 32]) : 0.0f;
 
