@@ -6,6 +6,7 @@
 pub mod autograd;
 pub mod cluster;
 pub mod data;
+pub mod dispatch;
 pub mod engine;
 pub mod functional;
 pub mod grad_check;
@@ -31,7 +32,7 @@ pub use engine::{
     EngineConfig, GenerationReport, SafeTensorsFile, SamplerConfig, StaticGPT2, StaticLoRAConfig,
     StaticLoRAGPT2, Tokenizer,
 };
-pub use optimizer::{AdamW, OffloadedAdamW};
+pub use optimizer::{AdamW, OffloadedAdamW, SGD};
 pub use scheduler::{CosineAnnealingLR, ExponentialLR, LRScheduler, StepLR};
 pub use tensor::{DType, Device, Shape, Tensor};
 

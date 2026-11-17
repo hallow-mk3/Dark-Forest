@@ -39,6 +39,7 @@ impl CharTokenizer {
             .filter_map(|c| self.index_by_char.get(&c).copied())
             .collect()
     }
+    #[allow(dead_code)]
     fn decode(&self, tokens: &[usize]) -> String {
         tokens
             .iter()

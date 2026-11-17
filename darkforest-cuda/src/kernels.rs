@@ -686,7 +686,7 @@ pub fn cuda_layernorm_backward(
     Err(anyhow::Error::msg("CUDA kernels not compiled"))
 }
 
-/// Fused FlashAttention-2 style kernel forward pass.
+/// Fused streaming online-softmax causal attention kernel forward pass.
 ///
 /// q, k, v: device pointers [seq_len, d_head]
 /// out:     device pointer  [seq_len, d_head]
@@ -1249,4 +1249,348 @@ pub fn cuda_argmax_1d(
     #[cfg(not(darkforest_cuda_kernels))]
     Err(anyhow::Error::msg("CUDA kernels not compiled"))
 }
+
+/// Split-K parallel autoregressive decode attention across long contexts.
+pub fn cuda_fused_mha_decode_kv_splitk(
+    q: *const f32,
+    k_cache: *const f32,
+    v_cache: *const f32,
+    partial_m: *mut f32,
+    partial_l: *mut f32,
+    partial_o: *mut f32,
+    out: *mut f32,
+    n_heads: usize,
+    cur_seq_len: usize,
+    d_head: usize,
+    scale: f32,
+    chunk_size: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_fused_mha_decode_kv_splitk(
+                q: *const f32,
+                k_cache: *const f32,
+                v_cache: *const f32,
+                partial_m: *mut f32,
+                partial_l: *mut f32,
+                partial_o: *mut f32,
+                out: *mut f32,
+                n_heads: u32,
+                cur_seq_len: u32,
+                d_head: u32,
+                scale: f32,
+                chunk_size: u32,
+            );
+        }
+        launch_fused_mha_decode_kv_splitk(
+            q,
+            k_cache,
+            v_cache,
+            partial_m,
+            partial_l,
+            partial_o,
+            out,
+            n_heads as u32,
+            cur_seq_len as u32,
+            d_head as u32,
+            scale,
+            chunk_size as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// Paged Attention decode: maps non-contiguous physical pages via block_table.
+pub fn cuda_paged_mha_decode_kv(
+    q: *const f32,
+    k_pool: *const f32,
+    v_pool: *const f32,
+    block_table: *const i32,
+    out: *mut f32,
+    n_heads: usize,
+    cur_seq_len: usize,
+    d_head: usize,
+    scale: f32,
+    page_size: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_paged_mha_decode_kv(
+                q: *const f32,
+                k_pool: *const f32,
+                v_pool: *const f32,
+                block_table: *const i32,
+                out: *mut f32,
+                n_heads: u32,
+                cur_seq_len: u32,
+                d_head: u32,
+                scale: f32,
+                page_size: u32,
+            );
+        }
+        launch_paged_mha_decode_kv(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            out,
+            n_heads as u32,
+            cur_seq_len as u32,
+            d_head as u32,
+            scale,
+            page_size as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// Split-K Paged Attention decode for extreme sequence lengths.
+pub fn cuda_paged_mha_decode_kv_splitk(
+    q: *const f32,
+    k_pool: *const f32,
+    v_pool: *const f32,
+    block_table: *const i32,
+    partial_m: *mut f32,
+    partial_l: *mut f32,
+    partial_o: *mut f32,
+    out: *mut f32,
+    n_heads: usize,
+    cur_seq_len: usize,
+    d_head: usize,
+    scale: f32,
+    page_size: usize,
+    chunk_size: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_paged_mha_decode_kv_splitk(
+                q: *const f32,
+                k_pool: *const f32,
+                v_pool: *const f32,
+                block_table: *const i32,
+                partial_m: *mut f32,
+                partial_l: *mut f32,
+                partial_o: *mut f32,
+                out: *mut f32,
+                n_heads: u32,
+                cur_seq_len: u32,
+                d_head: u32,
+                scale: f32,
+                page_size: u32,
+                chunk_size: u32,
+            );
+        }
+        launch_paged_mha_decode_kv_splitk(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            partial_m,
+            partial_l,
+            partial_o,
+            out,
+            n_heads as u32,
+            cur_seq_len as u32,
+            d_head as u32,
+            scale,
+            page_size as u32,
+            chunk_size as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// BF16 Paged Attention decode (2x memory compaction).
+pub fn cuda_paged_mha_decode_kv_bf16(
+    q: *const f32,
+    k_pool: *const u16,
+    v_pool: *const u16,
+    block_table: *const i32,
+    out: *mut f32,
+    n_heads: usize,
+    cur_seq_len: usize,
+    d_head: usize,
+    scale: f32,
+    page_size: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_paged_mha_decode_kv_bf16(
+                q: *const f32,
+                k_pool: *const u16,
+                v_pool: *const u16,
+                block_table: *const i32,
+                out: *mut f32,
+                n_heads: u32,
+                cur_seq_len: u32,
+                d_head: u32,
+                scale: f32,
+                page_size: u32,
+            );
+        }
+        launch_paged_mha_decode_kv_bf16(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            out,
+            n_heads as u32,
+            cur_seq_len as u32,
+            d_head as u32,
+            scale,
+            page_size as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// Linear Position Interpolation for context extrapolation.
+pub fn cuda_pos_embed_interpolate(
+    pos_table: *const f32,
+    out: *mut f32,
+    pos: usize,
+    trained_ctx_len: usize,
+    max_ctx_len: usize,
+    d_model: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_pos_embed_interpolate(
+                pos_table: *const f32,
+                out: *mut f32,
+                pos: u32,
+                trained_ctx_len: u32,
+                max_ctx_len: u32,
+                d_model: u32,
+            );
+        }
+        launch_pos_embed_interpolate(
+            pos_table,
+            out,
+            pos as u32,
+            trained_ctx_len as u32,
+            max_ctx_len as u32,
+            d_model as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// Rotary Position Embeddings (RoPE) applied to query or key vectors.
+pub fn cuda_apply_rope(
+    qk: *mut f32,
+    pos: usize,
+    n_heads: usize,
+    d_head: usize,
+    base_freq: f32,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_apply_rope(
+                qk: *mut f32,
+                pos: u32,
+                n_heads: u32,
+                d_head: u32,
+                base_freq: f32,
+            );
+        }
+        launch_apply_rope(
+            qk,
+            pos as u32,
+            n_heads as u32,
+            d_head as u32,
+            base_freq,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// Copy a 1D token vector into a paged physical pool block.
+pub fn cuda_paged_copy_row(
+    src: *const f32,
+    pool: *mut f32,
+    phys_block: i32,
+    page_offset: usize,
+    page_size: usize,
+    d_model: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_paged_copy_row(
+                src: *const f32,
+                pool: *mut f32,
+                phys_block: i32,
+                page_offset: u32,
+                page_size: u32,
+                d_model: u32,
+            );
+        }
+        launch_paged_copy_row(
+            src,
+            pool,
+            phys_block,
+            page_offset as u32,
+            page_size as u32,
+            d_model as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
+/// Copy a 1D float token vector cast directly to BF16 in a paged physical pool block.
+pub fn cuda_paged_copy_row_f32_to_bf16(
+    src: *const f32,
+    pool: *mut u16,
+    phys_block: i32,
+    page_offset: usize,
+    page_size: usize,
+    d_model: usize,
+) -> Result<()> {
+    #[cfg(darkforest_cuda_kernels)]
+    unsafe {
+        extern "C" {
+            fn launch_paged_copy_row_f32_to_bf16(
+                src: *const f32,
+                pool: *mut u16,
+                phys_block: i32,
+                page_offset: u32,
+                page_size: u32,
+                d_model: u32,
+            );
+        }
+        launch_paged_copy_row_f32_to_bf16(
+            src,
+            pool,
+            phys_block,
+            page_offset as u32,
+            page_size as u32,
+            d_model as u32,
+        );
+        return Ok(());
+    }
+    #[cfg(not(darkforest_cuda_kernels))]
+    Err(anyhow::Error::msg("CUDA kernels not compiled"))
+}
+
 

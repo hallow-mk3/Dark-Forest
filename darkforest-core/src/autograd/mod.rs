@@ -1,20 +1,29 @@
-//! Autograd engine: dynamic tape-based reverse-mode AD.
+//! Autograd engine: dynamic tape-based reverse-mode automatic differentiation.
 //!
-//! Design principles:
-//!  - Each forward op creates a `GradFn` that knows how to compute its inputs' gradients
-//!    from its output's gradient.
-//!  - Tensors that `requires_grad = true` accumulate gradients in `tensor.grad`.
-//!  - `backward()` takes a `Value` (the scalar loss) and walks the tape in reverse
-//!    topological order, calling each GradFn and accumulating into input grads.
-//!
-//! Phase 2 note: GradFn is a trait object — quantization hooks can be added as wrapper
-//! GradFns without touching the core engine.
+//! Features:
+//! - Iterative, non-recursive topological sweep engine (`engine::backward`).
+//! - Node trait with apply and next_edges.
+//! - SavedTensor tracking storage version counter for in-place mutation detection.
+//! - `sum_to_shape` for broadcasting backwards.
+//! - Thread-local `no_grad()` guard.
 
+pub mod broadcast;
 pub mod checkpoint;
+pub mod edge;
+pub mod engine;
 pub mod grad_fn;
+pub mod meta;
+pub mod node;
+pub mod ops;
+pub mod saved_tensor;
 pub mod tape;
 pub mod value;
 
-pub use checkpoint::checkpoint;
-pub use tape::{is_grad_enabled, no_grad};
+pub use broadcast::sum_to_shape;
+pub use edge::Edge;
+pub use engine::backward;
+pub use meta::{AccumulateGrad, AutogradMeta};
+pub use node::{next_node_id, Node};
+pub use saved_tensor::SavedTensor;
+pub use tape::{is_grad_enabled, no_grad, set_grad_enabled};
 pub use value::Value;

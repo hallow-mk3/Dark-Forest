@@ -387,6 +387,45 @@ impl GradFn for GeluGradFn {
 }
 
 // ---------------------------------------------------------------------------
+// ReluGradFn
+// ---------------------------------------------------------------------------
+pub struct ReluGradFn {
+    pub x: Tensor,
+}
+
+impl GradFn for ReluGradFn {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let x_vec = self.x.to_vec();
+        let g_vec = grad_output.to_vec();
+        let gx: Vec<f32> = x_vec
+            .iter()
+            .zip(g_vec.iter())
+            .map(|(&x, &g)| if x > 0.0 { g } else { 0.0 })
+            .collect();
+        vec![Tensor::from_vec(gx, self.x.shape.clone()).unwrap()]
+    }
+    fn required_inputs(&self) -> Vec<usize> {
+        vec![0]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReshapeGradFn
+// ---------------------------------------------------------------------------
+pub struct ReshapeGradFn {
+    pub orig_shape: Vec<usize>,
+}
+
+impl GradFn for ReshapeGradFn {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        vec![grad_output.reshape(self.orig_shape.clone()).unwrap()]
+    }
+    fn required_inputs(&self) -> Vec<usize> {
+        vec![0]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CrossEntropyGradFn
 // ---------------------------------------------------------------------------
 pub struct CrossEntropyGradFn {
@@ -716,6 +755,59 @@ impl GradFn for MaxPool2dGradFn {
         for (out_idx, &in_idx) in self.max_indices.iter().enumerate() {
             if in_idx < n {
                 grad_x[in_idx] += g_data[out_idx];
+            }
+        }
+
+        vec![Tensor::from_vec_device(grad_x, self.in_shape.clone(), grad_output.device.clone()).unwrap()]
+    }
+
+    fn required_inputs(&self) -> Vec<usize> {
+        vec![0]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AdaptiveAvgPool2dGradFn
+// ---------------------------------------------------------------------------
+pub struct AdaptiveAvgPool2dGradFn {
+    pub in_shape: Vec<usize>,
+    pub output_size: (usize, usize),
+}
+
+impl GradFn for AdaptiveAvgPool2dGradFn {
+    fn backward(&self, grad_output: &Tensor) -> Vec<Tensor> {
+        let (batch, c, h, w) = (
+            self.in_shape[0],
+            self.in_shape[1],
+            self.in_shape[2],
+            self.in_shape[3],
+        );
+        let (out_h, out_w) = self.output_size;
+        let mut grad_x = vec![0.0f32; batch * c * h * w];
+        let g_data = grad_output.to_vec();
+
+        for b in 0..batch {
+            for ch in 0..c {
+                for oh in 0..out_h {
+                    let start_h = (oh * h) / out_h;
+                    let end_h = ((oh + 1) * h + out_h - 1) / out_h;
+
+                    for ow in 0..out_w {
+                        let start_w = (ow * w) / out_w;
+                        let end_w = ((ow + 1) * w + out_w - 1) / out_w;
+
+                        let count = ((end_h - start_h) * (end_w - start_w)).max(1) as f32;
+                        let out_idx = b * (c * out_h * out_w) + ch * (out_h * out_w) + oh * out_w + ow;
+                        let g = g_data[out_idx] / count;
+
+                        for ih in start_h..end_h {
+                            for iw in start_w..end_w {
+                                let in_idx = b * (c * h * w) + ch * (h * w) + ih * w + iw;
+                                grad_x[in_idx] += g;
+                            }
+                        }
+                    }
+                }
             }
         }
 

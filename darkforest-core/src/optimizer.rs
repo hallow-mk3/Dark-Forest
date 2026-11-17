@@ -144,6 +144,110 @@ impl AdamW {
             param.update_tensor_data(new_data);
         }
     }
+
+    /// Perform one AdamW parameter update directly on `Tensor`s.
+    pub fn step_tensors(&mut self, params: &[crate::tensor::Tensor], max_norm: Option<f32>) {
+        if self.moments.is_empty() {
+            self.moments = params
+                .iter()
+                .map(|p| (vec![0.0f32; p.numel()], vec![0.0f32; p.numel()]))
+                .collect();
+        }
+        self.step += 1;
+
+        let t = self.step as f32;
+        let bias_corr1 = 1.0 - self.beta1.powf(t);
+        let bias_corr2 = 1.0 - self.beta2.powf(t);
+
+        let clip_scale = if let Some(mn) = max_norm {
+            let total_norm: f32 = params
+                .iter()
+                .filter_map(|p| p.grad())
+                .map(|g| g.to_vec().iter().map(|x| x * x).sum::<f32>())
+                .sum::<f32>()
+                .sqrt();
+            if total_norm > mn {
+                mn / (total_norm + 1e-8)
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+
+        for (pi, param) in params.iter().enumerate() {
+            let grad_tensor = match param.grad() {
+                Some(g) => g,
+                None => continue,
+            };
+            let grad_vec = grad_tensor.to_vec();
+            let (ref mut m, ref mut v) = self.moments[pi];
+            let n = param.numel();
+
+            for i in 0..n {
+                let p_val = param.get(i);
+                let g = grad_vec[i] * clip_scale;
+                let p_wd = p_val * (1.0 - self.lr * self.wd);
+                m[i] = self.beta1 * m[i] + (1.0 - self.beta1) * g;
+                v[i] = self.beta2 * v[i] + (1.0 - self.beta2) * g * g;
+                let m_hat = m[i] / bias_corr1;
+                let v_hat = v[i] / bias_corr2;
+                param.set(i, p_wd - self.lr * m_hat / (v_hat.sqrt() + self.eps));
+            }
+        }
+    }
+}
+
+/// SGD Optimizer with optional momentum and weight decay on `Tensor`s.
+pub struct SGD {
+    pub lr: f32,
+    pub momentum: f32,
+    pub weight_decay: f32,
+    pub velocities: Vec<Vec<f32>>,
+}
+
+impl SGD {
+    pub fn new(lr: f32, momentum: f32, weight_decay: f32) -> Self {
+        Self {
+            lr,
+            momentum,
+            weight_decay,
+            velocities: Vec::new(),
+        }
+    }
+
+    pub fn zero_grad(&self, params: &[crate::tensor::Tensor]) {
+        for p in params {
+            p.zero_grad();
+        }
+    }
+
+    pub fn step(&mut self, params: &[crate::tensor::Tensor]) {
+        if self.velocities.is_empty() {
+            self.velocities = params.iter().map(|p| vec![0.0f32; p.numel()]).collect();
+        }
+
+        for (pi, param) in params.iter().enumerate() {
+            let grad_tensor = match param.grad() {
+                Some(g) => g,
+                None => continue,
+            };
+            let grad = grad_tensor.to_vec();
+            let n = param.numel();
+            let v = &mut self.velocities[pi];
+
+            for i in 0..n {
+                let w = param.get(i);
+                let g = grad[i] + self.weight_decay * w;
+                if self.momentum != 0.0 {
+                    v[i] = self.momentum * v[i] + g;
+                    param.set(i, w - self.lr * v[i]);
+                } else {
+                    param.set(i, w - self.lr * g);
+                }
+            }
+        }
+    }
 }
 
 /// OffloadedAdamW (ZeRO-Offload style) optimizer.

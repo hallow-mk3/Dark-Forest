@@ -123,7 +123,7 @@ mod tests {
         let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let gamma = Tensor::from_vec(vec![1.0, 1.0, 1.0], vec![3]).unwrap();
         let beta = Tensor::from_vec(vec![0.0, 0.0, 0.0], vec![3]).unwrap();
-        let (out, means, rstds) = layernorm(&x, &gamma, &beta).unwrap();
+        let (out, _means, _rstds) = layernorm(&x, &gamma, &beta).unwrap();
         let data = out.to_vec();
         // Each row should have mean≈0, std≈1
         for bi in 0..2 {

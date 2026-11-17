@@ -3,6 +3,7 @@
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
 
+#[allow(dead_code)]
 const EPS: f32 = 1e-5;
 
 // ---------------------------------------------------------------------------

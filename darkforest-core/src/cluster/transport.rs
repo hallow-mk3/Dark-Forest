@@ -32,6 +32,8 @@ pub struct ChannelHub {
     receivers: HashMap<(usize, usize), Mutex<Receiver<Vec<f32>>>>,
     barrier_tx: HashMap<usize, Sender<()>>,
     barrier_rx: HashMap<usize, Mutex<Receiver<()>>>,
+    barrier_rel_tx: HashMap<usize, Sender<()>>,
+    barrier_rel_rx: HashMap<usize, Mutex<Receiver<()>>>,
 }
 
 impl ChannelHub {
@@ -41,6 +43,8 @@ impl ChannelHub {
         let mut receivers = HashMap::new();
         let mut barrier_tx = HashMap::new();
         let mut barrier_rx = HashMap::new();
+        let mut barrier_rel_tx = HashMap::new();
+        let mut barrier_rel_rx = HashMap::new();
 
         for src in 0..world_size {
             for dst in 0..world_size {
@@ -51,6 +55,10 @@ impl ChannelHub {
             let (b_tx, b_rx) = channel();
             barrier_tx.insert(src, b_tx);
             barrier_rx.insert(src, Mutex::new(b_rx));
+
+            let (br_tx, br_rx) = channel();
+            barrier_rel_tx.insert(src, br_tx);
+            barrier_rel_rx.insert(src, Mutex::new(br_rx));
         }
 
         Arc::new(Self {
@@ -59,6 +67,8 @@ impl ChannelHub {
             receivers,
             barrier_tx,
             barrier_rx,
+            barrier_rel_tx,
+            barrier_rel_rx,
         })
     }
 
@@ -122,9 +132,6 @@ impl Transport for ChannelTransport {
         if self.hub.world_size <= 1 {
             return Ok(());
         }
-        if let Some(tx) = self.hub.barrier_tx.get(&self.rank) {
-            tx.send(()).map_err(|e| anyhow::anyhow!("Barrier send failed: {}", e))?;
-        }
         if self.rank == 0 {
             for r in 1..self.hub.world_size {
                 if let Some(rx_mutex) = self.hub.barrier_rx.get(&r) {
@@ -132,6 +139,23 @@ impl Transport for ChannelTransport {
                     rx.recv_timeout(Duration::from_secs(5))
                         .map_err(|e| anyhow::anyhow!("Barrier timeout waiting for rank {}: {}", r, e))?;
                 }
+            }
+            // Release all waiting worker ranks
+            for r in 1..self.hub.world_size {
+                if let Some(tx) = self.hub.barrier_rel_tx.get(&r) {
+                    let _ = tx.send(());
+                }
+            }
+        } else {
+            // Signal arrival to rank 0
+            if let Some(tx) = self.hub.barrier_tx.get(&self.rank) {
+                tx.send(()).map_err(|e| anyhow::anyhow!("Barrier send failed: {}", e))?;
+            }
+            // Await release notification from rank 0
+            if let Some(rx_mutex) = self.hub.barrier_rel_rx.get(&self.rank) {
+                let rx = rx_mutex.lock().unwrap();
+                rx.recv_timeout(Duration::from_secs(5))
+                    .map_err(|e| anyhow::anyhow!("Barrier timeout awaiting release from rank 0: {}", e))?;
             }
         }
         Ok(())
@@ -166,19 +190,24 @@ impl TcpTransport {
         // Connect to peers with rank < self.rank
         for (&peer_rank, (peer_ip, peer_port)) in peers {
             if peer_rank < rank {
-                let stream = TcpStream::connect(format!("{}:{}", peer_ip, peer_port))?;
+                let mut stream = TcpStream::connect(format!("{}:{}", peer_ip, peer_port))?;
                 stream.set_nodelay(true)?;
+                // Send our connecting rank as a 4-byte little-endian handshake
+                stream.write_all(&(rank as u32).to_le_bytes())?;
+                stream.flush()?;
                 connections.insert(peer_rank, stream);
             }
         }
 
         // Accept incoming connections from peers with rank > self.rank
         for _ in (rank + 1)..world_size {
-            let (stream, _) = listener.accept()?;
+            let (mut stream, _) = listener.accept()?;
             stream.set_nodelay(true)?;
-            // In a full handshake, peer sends its rank first
-            // Here we assume sequential rank handshakes
-            connections.insert(connections.len(), stream);
+            // Read peer rank from handshake header
+            let mut rank_bytes = [0u8; 4];
+            stream.read_exact(&mut rank_bytes)?;
+            let peer_rank = u32::from_le_bytes(rank_bytes) as usize;
+            connections.insert(peer_rank, stream);
         }
 
         Ok(Self {
@@ -229,6 +258,14 @@ impl Transport for TcpTransport {
 
         let expected_bytes = expected_len * std::mem::size_of::<f32>();
         if byte_len != expected_bytes {
+            // Drain socket buffer to prevent persistent framing corruption
+            let mut discard = vec![0u8; byte_len.min(65536)];
+            let mut remaining = byte_len;
+            while remaining > 0 {
+                let to_read = remaining.min(discard.len());
+                let _ = stream.read_exact(&mut discard[..to_read]);
+                remaining -= to_read;
+            }
             bail!("TCP byte length mismatch: expected {} bytes, got {}", expected_bytes, byte_len);
         }
 
@@ -241,7 +278,35 @@ impl Transport for TcpTransport {
     }
 
     fn barrier(&self) -> Result<()> {
-        // Minimal synchronization barrier
+        if self.world_size <= 1 {
+            return Ok(());
+        }
+        let mut conns = self.connections.lock().unwrap();
+        if self.rank == 0 {
+            // Master coordinates: collect arrival from all worker ranks
+            for r in 1..self.world_size {
+                if let Some(stream) = conns.get_mut(&r) {
+                    let mut token = [0u8; 1];
+                    stream.read_exact(&mut token)?;
+                }
+            }
+            // Master releases all worker ranks
+            for r in 1..self.world_size {
+                if let Some(stream) = conns.get_mut(&r) {
+                    stream.write_all(&[1u8])?;
+                    stream.flush()?;
+                }
+            }
+        } else {
+            // Worker signals arrival to rank 0
+            if let Some(stream) = conns.get_mut(&0) {
+                stream.write_all(&[1u8])?;
+                stream.flush()?;
+                // Worker awaits release notification from rank 0
+                let mut token = [0u8; 1];
+                stream.read_exact(&mut token)?;
+            }
+        }
         Ok(())
     }
 }

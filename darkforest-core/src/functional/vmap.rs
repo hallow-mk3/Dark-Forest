@@ -1,4 +1,7 @@
-//! Automatic Vectorization Transformation (JAX jax.vmap equivalent)
+//! Automatic Batch Vectorization Transformation (Host-Level Slice Parallelism)
+//!
+//! Note: Unlike JAX's primitive-level batched rule lowering, this implementation provides
+//! host-level parallel slice evaluation across worker threads using Rayon.
 //!
 //! Features:
 //! - Transforms a function defined on single samples into an automatically batched function

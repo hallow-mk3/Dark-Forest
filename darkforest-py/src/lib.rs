@@ -883,6 +883,559 @@ impl PyEngine {
 }
 
 #[cfg(feature = "python")]
+#[pyclass(name = "Tensor")]
+#[derive(Clone)]
+pub struct PyTensor {
+    pub(crate) inner: darkforest_core::tensor::Tensor,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyTensor {
+    #[new]
+    #[pyo3(signature = (data, shape=None))]
+    fn new(data: Vec<f32>, shape: Option<Vec<usize>>) -> PyResult<Self> {
+        let shape = shape.unwrap_or_else(|| vec![data.len()]);
+        let inner = darkforest_core::tensor::Tensor::from_vec(data, shape)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    #[staticmethod]
+    fn zeros(shape: Vec<usize>) -> Self {
+        PyTensor {
+            inner: darkforest_core::tensor::Tensor::zeros(shape),
+        }
+    }
+
+    #[staticmethod]
+    fn ones(shape: Vec<usize>) -> Self {
+        PyTensor {
+            inner: darkforest_core::tensor::Tensor::ones(shape),
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (shape, std=1.0))]
+    fn randn(shape: Vec<usize>, std: f32) -> Self {
+        PyTensor {
+            inner: darkforest_core::tensor::Tensor::randn(shape, std),
+        }
+    }
+
+    #[staticmethod]
+    fn from_list(data: Vec<f32>, shape: Vec<usize>) -> PyResult<Self> {
+        let inner = darkforest_core::tensor::Tensor::from_vec(data, shape)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    #[staticmethod]
+    fn from_list_i64(data: Vec<i64>, shape: Vec<usize>) -> PyResult<Self> {
+        let inner = darkforest_core::tensor::Tensor::from_slice_i64(&data, shape)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    #[getter]
+    fn shape(&self) -> Vec<usize> {
+        self.inner.shape.clone()
+    }
+
+    fn size(&self) -> Vec<usize> {
+        self.inner.shape.clone()
+    }
+
+    #[getter]
+    fn stride(&self) -> Vec<isize> {
+        self.inner.strides.clone()
+    }
+
+    fn strides(&self) -> Vec<isize> {
+        self.inner.strides.clone()
+    }
+
+    #[getter]
+    fn storage_offset(&self) -> usize {
+        self.inner.storage_offset
+    }
+
+    #[getter]
+    fn dtype(&self) -> String {
+        self.inner.dtype.to_string()
+    }
+
+    #[getter]
+    fn device(&self) -> String {
+        self.inner.device.to_string()
+    }
+
+    fn version(&self) -> usize {
+        self.inner.version()
+    }
+
+    fn is_contiguous(&self) -> bool {
+        self.inner.is_contiguous()
+    }
+
+    fn numel(&self) -> usize {
+        self.inner.numel()
+    }
+
+    fn ndim(&self) -> usize {
+        self.inner.ndim()
+    }
+
+    fn to_list(&self) -> Vec<f32> {
+        self.inner.to_vec()
+    }
+
+    fn to_list_i64(&self) -> PyResult<Vec<i64>> {
+        self.inner
+            .to_vec_i64()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
+    fn get(&self, flat_idx: usize) -> f32 {
+        self.inner.get(flat_idx)
+    }
+
+    fn set(&self, flat_idx: usize, val: f32) {
+        self.inner.set(flat_idx, val);
+    }
+
+    fn add_inplace_(&mut self, scalar: f32) -> PyResult<()> {
+        self.inner
+            .add_inplace_(scalar)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
+    #[getter]
+    fn requires_grad(&self) -> bool {
+        self.inner.requires_grad
+    }
+
+    #[setter]
+    fn set_requires_grad(&mut self, req: bool) {
+        self.inner.set_requires_grad(req);
+    }
+
+    fn requires_grad_(&mut self, req: bool) {
+        self.inner.set_requires_grad(req);
+    }
+
+    #[getter]
+    fn grad(&self) -> Option<PyTensor> {
+        self.inner.grad().map(|g| PyTensor { inner: g })
+    }
+
+    fn zero_grad(&self) {
+        self.inner.zero_grad();
+    }
+
+    #[pyo3(signature = (gradient=None, retain_graph=false))]
+    fn backward(&self, gradient: Option<&PyTensor>, retain_graph: bool) -> PyResult<()> {
+        let grad = gradient.map(|g| g.inner.clone());
+        self.inner
+            .backward(grad, retain_graph)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
+    fn detach(&self) -> Self {
+        PyTensor {
+            inner: self.inner.detach(),
+        }
+    }
+
+    #[pyo3(signature = (size, stride, storage_offset=None))]
+    fn as_strided(
+        &self,
+        size: Vec<usize>,
+        stride: Vec<isize>,
+        storage_offset: Option<usize>,
+    ) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .as_strided(size, stride, storage_offset)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn transpose(&self, dim0: usize, dim1: usize) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .transpose(dim0, dim1)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn permute(&self, dims: Vec<usize>) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .permute(&dims)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    #[pyo3(signature = (dim=None))]
+    fn squeeze(&self, dim: Option<i64>) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .squeeze(dim)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn unsqueeze(&self, dim: i64) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .unsqueeze(dim)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    #[pyo3(signature = (dim, start, end, step=1))]
+    fn slice(&self, dim: usize, start: usize, end: usize, step: usize) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .slice(dim, start, end, step)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn expand(&self, shape: Vec<usize>) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .expand(&shape)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn view(&self, shape: Vec<usize>) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .view(shape)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn reshape(&self, shape: Vec<usize>) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .reshape(shape)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    #[pyo3(signature = (start_dim=0, end_dim=-1))]
+    fn flatten(&self, start_dim: i64, end_dim: i64) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .flatten(start_dim, end_dim)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn contiguous(&self) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .contiguous()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn flip(&self, dims: Vec<usize>) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .flip(&dims)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn has_internal_overlap(&self) -> bool {
+        self.inner.has_internal_overlap()
+    }
+
+    fn to_dtype(&self, dtype: &str) -> PyResult<Self> {
+        let dt = match dtype.to_lowercase().as_str() {
+            "float32" | "f32" => darkforest_core::tensor::DType::F32,
+            "float16" | "f16" => darkforest_core::tensor::DType::F16,
+            "bfloat16" | "bf16" => darkforest_core::tensor::DType::BF16,
+            "int64" | "i64" => darkforest_core::tensor::DType::I64,
+            "int32" | "i32" => darkforest_core::tensor::DType::I32,
+            "bool" => darkforest_core::tensor::DType::Bool,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown dtype {}",
+                    dtype
+                )))
+            }
+        };
+        let inner = self
+            .inner
+            .to_dtype(dt)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn add(&self, other: &PyTensor) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .add(&other.inner)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn sub(&self, other: &PyTensor) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .sub(&other.inner)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn mul(&self, other: &PyTensor) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .mul(&other.inner)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn div(&self, other: &PyTensor) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .div(&other.inner)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn neg(&self) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .neg()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn relu(&self) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .relu()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn matmul(&self, other: &PyTensor) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .matmul(&other.inner)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    #[pyo3(signature = (dims=None, keepdim=false))]
+    fn sum(&self, dims: Option<Vec<usize>>, keepdim: bool) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .sum(dims.as_deref(), keepdim)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    #[pyo3(signature = (dims=None, keepdim=false))]
+    fn mean(&self, dims: Option<Vec<usize>>, keepdim: bool) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .mean(dims.as_deref(), keepdim)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn log_softmax(&self, dim: isize) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .log_softmax(dim)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn cross_entropy(&self, target: &PyTensor) -> PyResult<Self> {
+        let inner = self
+            .inner
+            .cross_entropy(&target.inner)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(PyTensor { inner })
+    }
+
+    fn __add__(&self, other: &PyTensor) -> PyResult<Self> {
+        self.add(other)
+    }
+
+    fn __sub__(&self, other: &PyTensor) -> PyResult<Self> {
+        self.sub(other)
+    }
+
+    fn __mul__(&self, other: &PyTensor) -> PyResult<Self> {
+        self.mul(other)
+    }
+
+    fn __truediv__(&self, other: &PyTensor) -> PyResult<Self> {
+        self.div(other)
+    }
+
+    fn __matmul__(&self, other: &PyTensor) -> PyResult<Self> {
+        self.matmul(other)
+    }
+
+    fn __neg__(&self) -> PyResult<Self> {
+        self.neg()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{}", self.inner)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SGD")]
+pub struct PySGD {
+    inner: darkforest_core::nn::TapeSGD,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PySGD {
+    #[new]
+    #[pyo3(signature = (lr=0.01, momentum=0.0, weight_decay=0.0))]
+    fn new(lr: f32, momentum: f32, weight_decay: f32) -> Self {
+        Self {
+            inner: darkforest_core::nn::TapeSGD::new(lr, momentum, weight_decay),
+        }
+    }
+
+    fn step(&mut self, params: Vec<PyRef<PyTensor>>) {
+        let raw_params: Vec<darkforest_core::tensor::Tensor> =
+            params.iter().map(|p| p.inner.clone()).collect();
+        self.inner.step(&raw_params);
+    }
+
+    fn zero_grad(&self, params: Vec<PyRef<PyTensor>>) {
+        for p in &params {
+            p.inner.zero_grad();
+        }
+    }
+
+    #[getter]
+    fn lr(&self) -> f32 {
+        self.inner.lr
+    }
+
+    #[setter]
+    fn set_lr(&mut self, lr: f32) {
+        self.inner.lr = lr;
+    }
+
+    #[getter]
+    fn momentum(&self) -> f32 {
+        self.inner.momentum
+    }
+
+    #[setter]
+    fn set_momentum(&mut self, m: f32) {
+        self.inner.momentum = m;
+    }
+
+    #[getter]
+    fn weight_decay(&self) -> f32 {
+        self.inner.weight_decay
+    }
+
+    #[setter]
+    fn set_weight_decay(&mut self, wd: f32) {
+        self.inner.weight_decay = wd;
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AdamW")]
+pub struct PyAdamW {
+    inner: darkforest_core::nn::TapeAdamW,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyAdamW {
+    #[new]
+    #[pyo3(signature = (lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.01))]
+    fn new(lr: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32) -> Self {
+        Self {
+            inner: darkforest_core::nn::TapeAdamW::new(lr, beta1, beta2, eps, weight_decay),
+        }
+    }
+
+    fn step(&mut self, params: Vec<PyRef<PyTensor>>) {
+        let raw_params: Vec<darkforest_core::tensor::Tensor> =
+            params.iter().map(|p| p.inner.clone()).collect();
+        self.inner.step(&raw_params);
+    }
+
+    fn zero_grad(&self, params: Vec<PyRef<PyTensor>>) {
+        for p in &params {
+            p.inner.zero_grad();
+        }
+    }
+
+    #[getter]
+    fn lr(&self) -> f32 {
+        self.inner.lr
+    }
+
+    #[setter]
+    fn set_lr(&mut self, lr: f32) {
+        self.inner.lr = lr;
+    }
+
+    #[getter]
+    fn weight_decay(&self) -> f32 {
+        self.inner.weight_decay
+    }
+
+    #[setter]
+    fn set_weight_decay(&mut self, wd: f32) {
+        self.inner.weight_decay = wd;
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "no_grad")]
+pub struct PyNoGrad {
+    prev: bool,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyNoGrad {
+    #[new]
+    fn new() -> Self {
+        Self { prev: true }
+    }
+
+    fn __enter__(&mut self) {
+        self.prev = darkforest_core::autograd::set_grad_enabled(false);
+    }
+
+    fn __exit__(
+        &mut self,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc_val: &Bound<'_, PyAny>,
+        _exc_tb: &Bound<'_, PyAny>,
+    ) {
+        darkforest_core::autograd::set_grad_enabled(self.prev);
+    }
+}
+
+#[cfg(feature = "python")]
 #[pymodule]
 fn _darkforest_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
@@ -891,6 +1444,10 @@ fn _darkforest_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(smoke_test, m)?)?;
     m.add_function(wrap_pyfunction!(benchmark_matrix_step, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_sync, m)?)?;
+    m.add_class::<PyTensor>()?;
+    m.add_class::<PySGD>()?;
+    m.add_class::<PyAdamW>()?;
+    m.add_class::<PyNoGrad>()?;
     m.add_class::<PyStaticGPT2>()?;
     m.add_class::<PyStaticLoRAConfig>()?;
     m.add_class::<PyStaticLoRAGPT2>()?;

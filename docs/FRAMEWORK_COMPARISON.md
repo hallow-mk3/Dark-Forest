@@ -34,7 +34,8 @@ Sources: `benchmark/bench_exact_same_config.py` (PyTorch 7-trial baseline) and `
 | **Instantaneous Step Time** | `58.473 ms` | `25.710 ms` | **2.27× Faster** |
 | **Execution Throughput** | `2,101 tok/s` | `4,953 tok/s` | **2.36× Higher Throughput** |
 | **Step Std Dev (Jitter)** | `1.397 ms` | `0.242 ms` | **5.77× Tighter Determinism** |
-| **Peak VRAM Allocation** | `1,420 MB` | `480 MB` | **2.96× Less VRAM Footprint** |
+| **Model Parameter Footprint** | `496 MB` | `496 MB` | **Exact 124M Float32 Parameter Parity** |
+| **Peak Training VRAM ($S=128$)** | `1,420 – 2,099 MB` | `3,170 MB` | **Contiguous Static Pre-Allocation (FP32 weights + grads + AdamW moments + activations)** |
 | **Runtime Heap Calls / Step** | Multiple dynamic reuses | **Zero** (`cudaMalloc`/`cudaFree` = 0) | **Deterministic Static Device Resident** |
 
 > [!NOTE]
@@ -55,7 +56,7 @@ While PyTorch was designed around dynamic imperative tensors, JAX gained fame fo
 
 ### B. VRAM Allocation & Hoarding
 * **JAX Limitation**: By default, XLA pre-allocates and locks **75% to 90%** of total GPU VRAM upon initialization (`XLA_PYTHON_CLIENT_MEM_FRACTION=0.75`). On an 8 GB consumer GPU, JAX immediately locks ~6 GB, starving all concurrent processes even if the model only needs 500 MB.
-* **Dark Forest Advantage**: Dark Forest allocates **only the exact theoretical minimum** required for forward activations, backward gradients, and optimizer moments. For full GPT-2, it claims exactly **480 MB** and releases nothing to driver fragmentation.
+* **Dark Forest Advantage**: Dark Forest pre-allocates the exact static footprint required for weights, forward activations, backward gradients, and AdamW moments (3,170 MB at $S=128$) up front in a single contiguous block, avoiding runtime driver fragmentation and ensuring zero dynamic allocations during training.
 
 ### C. Functional Purity & Splittable PRNG Keys
 Both JAX and Dark Forest enforce functional purity:

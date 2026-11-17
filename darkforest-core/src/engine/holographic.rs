@@ -1,13 +1,16 @@
-//! Holographic Context Compaction & Manifold Caching
+//! Holographic Context Compaction & Continuous Associative Memory
 //!
-//! Solves the $O(S)$ KV-cache memory wall in autoregressive transformers.
-//! Replaces linear KV-growth with a constant-memory continuous associative memory manifold:
+//! Provides a fixed-capacity continuous associative memory manifold based on outer-product
+//! fast weights (Hebbian / Linear Attention accumulation) for autoregressive models:
 //!
 //! - **$O(1)$ Constant Memory**: Memory footprint is bounded by $D \times D$, regardless of context length
-//! - **Associative Holographic Binding**: Context is bound into continuous matrix manifolds via outer products
+//! - **Associative Outer-Product Binding**: Context is accumulated into continuous matrix manifolds ($M \leftarrow \lambda M + k^T v$)
 //! - **Decay & Recency Scaling**: Exponential forgetting factor $\lambda \in (0, 1]$ prioritizes recent history
-//! - **Hybrid Windowing**: Maintains an exact local attention window while projecting long-range context
-//!   into the holographic manifold
+//! - **Hybrid Windowing**: Maintains an exact local attention window while accumulating long-range history
+//!   into the associative matrix
+//!
+//! Note: As with all finite-rank outer-product memory manifolds, capacity is mathematically bounded
+//! by $D$; older token associations undergo continuous lossy decay.
 
 use anyhow::{bail, Result};
 

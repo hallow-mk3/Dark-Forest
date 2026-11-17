@@ -9,6 +9,7 @@ pub mod generate;
 pub mod holographic;
 pub mod kv_cache;
 pub mod lora;
+pub mod paged_kv;
 pub mod safetensors;
 pub mod static_gpt2;
 pub mod tokenizer;
@@ -21,6 +22,7 @@ pub use generate::{
 pub use holographic::{HolographicCache, HolographicConfig, HolographicLayerCache};
 pub use kv_cache::KVCache;
 pub use lora::{StaticLoRAConfig, StaticLoRAGPT2};
+pub use paged_kv::{KVDtype, PagedKVCache, PagedKVPool, SequenceBlockTable};
 pub use safetensors::{load_gpt2_safetensors, save_gpt2_safetensors, SafeTensorsFile, TensorMeta};
 pub use static_gpt2::StaticGPT2;
 pub use tokenizer::{BPETokenizer, ByteTokenizer, CharTokenizer, Tokenizer};

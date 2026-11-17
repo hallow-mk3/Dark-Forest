@@ -1,4 +1,8 @@
-//! Just-In-Time (JIT) Compilation & Operator Fusion Engine (JAX jax.jit equivalent)
+//! Traced Expression AST Graph & Operator Fusion Engine
+//!
+//! Note: This engine performs symbolic tracing, dead-code elimination, and elementwise
+//! operator fusion (e.g. Fused Multiply-Add), evaluating graphs through an interpreted
+//! buffer plan. It does not compile to native machine code or XLA/MLIR.
 //!
 //! Features:
 //! - Computational Intermediate Representation (`IrGraph`, `IrNode`, `IrOp`)
@@ -6,7 +10,7 @@
 //! - Dead-Code Elimination (DCE) pass removing unreferenced buffers
 //! - Elementwise Operator Fusion pass (e.g. `(x * a) + b` -> fused Multiply-Add)
 //! - Pre-allocated memory reuse planner eliminating dynamic allocations during inference
-//! - `jit(f)` wrapper caching compiled execution plans by input shape signature
+//! - `jit(f)` wrapper caching execution plans by input shape signature
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

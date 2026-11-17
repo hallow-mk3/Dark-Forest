@@ -131,6 +131,7 @@ fn main() -> Result<()> {
     println!("Config: {:?}", cfg);
     println!("Approx params: {}", cfg.param_count());
 
+    #[allow(unused_mut)]
     let mut model = GPT2::new(cfg.clone());
     if device == "cuda" {
         #[cfg(feature = "cuda")]

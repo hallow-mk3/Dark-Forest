@@ -3,7 +3,7 @@
 //! This implements standard scaled dot-product attention:
 //!   Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) · V
 //!
-//! The fused FlashAttention-style CUDA kernel replaces this in Milestone 4.
+//! The fused online-softmax CUDA attention kernel replaces this on GPU in `StaticGPT2`.
 
 use crate::autograd::Value;
 use crate::nn::linear::Linear;

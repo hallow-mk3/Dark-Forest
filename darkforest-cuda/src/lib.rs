@@ -5,7 +5,7 @@
 //!   - Host<->Device transfers
 //!   - cuBLAS sgemm binding
 //!   - Elementwise CUDA kernels
-//!   - Fused attention kernel (FlashAttention-2 style, sm_120)
+//!   - Fused attention kernel (streaming online-softmax causal attention, sm_120)
 //!
 //! When compiled without CUDA toolkit, all functions return Err("CUDA not available").
 
@@ -83,6 +83,7 @@ mod cublas {
             workspace: *mut c_void,
             workspace_size_in_bytes: usize,
         ) -> i32;
+        #[allow(dead_code)]
         pub fn cublasDestroy_v2(handle: *mut c_void) -> i32;
         pub fn cublasSgemm_v2(
             handle: *mut c_void,
@@ -550,6 +551,78 @@ impl DeviceTensor {
         self.buffer.copy_bytes_to(&mut dst.buffer, row_idx * bytes, bytes)
     }
 
+    /// Interpolate position embedding from a trained position table of size [trained_ctx_len, d_model].
+    pub fn pos_embed_interpolate_into(
+        &self,
+        pos: usize,
+        trained_ctx_len: usize,
+        max_ctx_len: usize,
+        out: &mut DeviceTensor,
+    ) -> Result<()> {
+        let d_model = self.shape[1];
+        if out.numel() != d_model {
+            return Err(anyhow!("pos_embed_interpolate_into out numel mismatch"));
+        }
+        kernels::cuda_pos_embed_interpolate(
+            self.as_ptr(),
+            out.as_mut_ptr(),
+            pos,
+            trained_ctx_len,
+            max_ctx_len,
+            d_model,
+        )
+    }
+
+    /// Apply Rotary Position Embeddings (RoPE) in-place to [1, d_model] query/key vector.
+    pub fn apply_rope(
+        &mut self,
+        pos: usize,
+        n_heads: usize,
+        d_head: usize,
+        base_freq: f32,
+    ) -> Result<()> {
+        if self.numel() != n_heads * d_head {
+            return Err(anyhow!("apply_rope numel mismatch"));
+        }
+        kernels::cuda_apply_rope(self.as_mut_ptr(), pos, n_heads, d_head, base_freq)
+    }
+
+    /// Copy 1D token vector into paged KV pool block.
+    pub fn paged_copy_row_into(
+        &self,
+        pool: &mut DeviceTensor,
+        phys_block: i32,
+        page_offset: usize,
+        page_size: usize,
+    ) -> Result<()> {
+        kernels::cuda_paged_copy_row(
+            self.as_ptr(),
+            pool.as_mut_ptr(),
+            phys_block,
+            page_offset,
+            page_size,
+            self.numel(),
+        )
+    }
+
+    /// Copy 1D float token vector cast to BF16 into paged KV pool block.
+    pub fn paged_copy_row_bf16_into(
+        &self,
+        pool: &mut DeviceTensor,
+        phys_block: i32,
+        page_offset: usize,
+        page_size: usize,
+    ) -> Result<()> {
+        kernels::cuda_paged_copy_row_f32_to_bf16(
+            self.as_ptr(),
+            pool.as_mut_ptr() as *mut u16,
+            phys_block,
+            page_offset,
+            page_size,
+            self.numel(),
+        )
+    }
+
     /// Asynchronously download a slice of f32 elements to page-locked pinned memory.
     pub fn async_download_slice_to_pinned(
         &self,
@@ -642,7 +715,7 @@ impl DeviceTensor {
         if self.shape != other.shape {
             return Err(anyhow!("DeviceTensor::add_inplace shape mismatch"));
         }
-        let mut tmp = DeviceTensor::zeros(self.shape.clone())?;
+        let tmp = DeviceTensor::zeros(self.shape.clone())?;
         kernels::cuda_add(
             self.as_ptr(),
             other.as_ptr(),
@@ -977,7 +1050,7 @@ impl DeviceTensor {
             .shape
             .last()
             .ok_or_else(|| anyhow!("layernorm empty shape"))?;
-        let batch = x.numel() / features;
+        let _batch = x.numel() / features;
         let mut grad_x = DeviceTensor::zeros(x.shape.clone())?;
         let mut grad_gamma = if gamma.is_some() {
             Some(DeviceTensor::zeros(vec![features])?)
@@ -1734,7 +1807,7 @@ impl DeviceTensor {
         seq_len: usize,
         grad_out: &DeviceTensor,
         grad_weight: &mut DeviceTensor,
-        vocab_size: usize,
+        _vocab_size: usize,
         embed_dim: usize,
     ) -> Result<()> {
         grad_weight.zero_()?;
@@ -2025,11 +2098,11 @@ impl AttentionContext {
         if q.numel() != self.d_model || out.numel() != self.d_model {
             return Err(anyhow!("decode_kv_into Q or Out dimension mismatch"));
         }
-        if cur_seq_len == 0 || cur_seq_len > self.seq_len {
+        if cur_seq_len == 0 || cur_seq_len > k_cache.shape[0] {
             return Err(anyhow!(
                 "decode_kv_into cur_seq_len {} out of bounds (1..={})",
                 cur_seq_len,
-                self.seq_len
+                k_cache.shape[0]
             ));
         }
         kernels::cuda_fused_mha_decode_kv(
@@ -2041,6 +2114,110 @@ impl AttentionContext {
             cur_seq_len,
             self.d_head,
             scale,
+        )
+    }
+
+    /// Single-token autoregressive decoding attention using non-contiguous physical pages.
+    pub fn decode_paged_kv_into(
+        &self,
+        q: &DeviceTensor,
+        k_pool: &DeviceTensor,
+        v_pool: &DeviceTensor,
+        block_table: *const i32,
+        cur_seq_len: usize,
+        scale: f32,
+        page_size: usize,
+        out: &mut DeviceTensor,
+    ) -> Result<()> {
+        if q.numel() != self.d_model || out.numel() != self.d_model {
+            return Err(anyhow!("decode_paged_kv_into Q or Out dimension mismatch"));
+        }
+        if cur_seq_len == 0 {
+            return Ok(());
+        }
+        kernels::cuda_paged_mha_decode_kv(
+            q.as_ptr(),
+            k_pool.as_ptr(),
+            v_pool.as_ptr(),
+            block_table,
+            out.as_mut_ptr(),
+            self.n_heads,
+            cur_seq_len,
+            self.d_head,
+            scale,
+            page_size,
+        )
+    }
+
+    /// Single-token autoregressive decoding attention using BF16 physical pages (2x compact).
+    pub fn decode_paged_kv_bf16_into(
+        &self,
+        q: &DeviceTensor,
+        k_pool: &DeviceTensor,
+        v_pool: &DeviceTensor,
+        block_table: *const i32,
+        cur_seq_len: usize,
+        scale: f32,
+        page_size: usize,
+        out: &mut DeviceTensor,
+    ) -> Result<()> {
+        if q.numel() != self.d_model || out.numel() != self.d_model {
+            return Err(anyhow!("decode_paged_kv_bf16_into Q or Out dimension mismatch"));
+        }
+        if cur_seq_len == 0 {
+            return Ok(());
+        }
+        kernels::cuda_paged_mha_decode_kv_bf16(
+            q.as_ptr(),
+            k_pool.as_ptr() as *const u16,
+            v_pool.as_ptr() as *const u16,
+            block_table,
+            out.as_mut_ptr(),
+            self.n_heads,
+            cur_seq_len,
+            self.d_head,
+            scale,
+            page_size,
+        )
+    }
+
+    /// Split-K parallel paged attention decode for extreme sequence lengths.
+    pub fn decode_paged_kv_splitk_into(
+        &self,
+        q: &DeviceTensor,
+        k_pool: &DeviceTensor,
+        v_pool: &DeviceTensor,
+        block_table: *const i32,
+        partial_m: &mut DeviceTensor,
+        partial_l: &mut DeviceTensor,
+        partial_o: &mut DeviceTensor,
+        cur_seq_len: usize,
+        scale: f32,
+        page_size: usize,
+        chunk_size: usize,
+        out: &mut DeviceTensor,
+    ) -> Result<()> {
+        if q.numel() != self.d_model || out.numel() != self.d_model {
+            return Err(anyhow!("decode_paged_kv_splitk_into Q or Out dimension mismatch"));
+        }
+        if cur_seq_len == 0 {
+            return Ok(());
+        }
+        kernels::cuda_paged_mha_decode_kv_splitk(
+            q.as_ptr(),
+            k_pool.as_ptr(),
+            v_pool.as_ptr(),
+            block_table,
+            partial_m.as_mut_ptr(),
+            partial_l.as_mut_ptr(),
+            partial_o.as_mut_ptr(),
+            out.as_mut_ptr(),
+            self.n_heads,
+            cur_seq_len,
+            self.d_head,
+            scale,
+            page_size,
+            chunk_size,
         )
     }
 

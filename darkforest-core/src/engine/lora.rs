@@ -247,6 +247,7 @@ impl StaticLoRAGPT2 {
         let lr = base.lr();
         let _seq_len = base.seq_len();
         let _d_model = base.d_model();
+        #[allow(unused_variables)]
         let n_layers = base.n_layers();
 
         #[cfg(feature = "cuda")]

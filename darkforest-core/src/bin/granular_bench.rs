@@ -1,18 +1,6 @@
 // Granular per-section timing by adding sync points between each stage
 use anyhow::Result;
 use darkforest_core::StaticGPT2;
-use std::time::Instant;
-
-macro_rules! timed {
-    ($label:expr, $body:expr) => {{
-        let t = Instant::now();
-        $body;
-        darkforest_core::cuda_sync()?;
-        let ms = t.elapsed().as_secs_f64() * 1000.0;
-        println!("  {:40} {:7.3} ms", $label, ms);
-        ms
-    }};
-}
 
 fn main() -> Result<()> {
     let vocab_size = 50257;

@@ -40,11 +40,29 @@ status = _darkforest_py.status
 smoke_test = _darkforest_py.smoke_test
 benchmark_matrix_step = _darkforest_py.benchmark_matrix_step
 cuda_sync = _darkforest_py.cuda_sync
+Tensor = getattr(_darkforest_py, "Tensor", None)
+SGD = getattr(_darkforest_py, "SGD", None)
+AdamW = getattr(_darkforest_py, "AdamW", None)
+no_grad = getattr(_darkforest_py, "no_grad", None)
 StaticGPT2 = _darkforest_py.StaticGPT2
 StaticLoRAConfig = _darkforest_py.StaticLoRAConfig
 StaticLoRAGPT2 = _darkforest_py.StaticLoRAGPT2
 EngineConfig = getattr(_darkforest_py, "EngineConfig", None)
 Engine = getattr(_darkforest_py, "Engine", None)
+
+if Tensor is not None:
+    def tensor_numpy(self):
+        import numpy as np
+        return np.array(self.to_list(), dtype=np.float32).reshape(self.shape)
+
+    @classmethod
+    def tensor_from_numpy(cls, arr):
+        import numpy as np
+        arr_f32 = np.ascontiguousarray(arr, dtype=np.float32)
+        return cls.from_list(arr_f32.flatten().tolist(), list(arr.shape))
+
+    Tensor.numpy = tensor_numpy
+    Tensor.from_numpy = tensor_from_numpy
 
 __version__ = version()
 __product_name__ = product_name()
@@ -57,6 +75,7 @@ __all__ = [
     "smoke_test",
     "benchmark_matrix_step",
     "cuda_sync",
+    "Tensor",
     "StaticGPT2",
     "StaticLoRAConfig",
     "StaticLoRAGPT2",

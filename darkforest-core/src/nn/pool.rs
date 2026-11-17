@@ -227,10 +227,21 @@ impl AdaptiveAvgPool2d {
             }
         }
 
-        Ok(Value::leaf(Tensor::from_vec_device(
+        let out_t = Tensor::from_vec_device(
             out_data,
             vec![batch, c, out_h, out_w],
-            xt.device,
-        )?))
+            xt.device.clone(),
+        )?;
+
+        if !crate::autograd::is_grad_enabled() {
+            return Ok(Value::leaf(out_t));
+        }
+
+        let grad_fn = Box::new(crate::autograd::grad_fn::AdaptiveAvgPool2dGradFn {
+            in_shape: xt.shape.clone(),
+            output_size: self.output_size,
+        });
+
+        Ok(Value::from_op(out_t, grad_fn, vec![x.clone()]))
     }
 }

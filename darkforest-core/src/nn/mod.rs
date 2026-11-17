@@ -12,6 +12,7 @@ pub mod pool;
 pub mod quantization;
 pub mod rnn;
 pub mod sequential;
+pub mod tape_linear;
 pub mod transformer;
 
 pub use activation_modules::*;
@@ -26,4 +27,5 @@ pub use pool::{AdaptiveAvgPool2d, AvgPool2d, MaxPool2d};
 pub use quantization::{dequantize_nf4_cpu, quantize_nf4_cpu, QLoRALinear, NF4_TABLE};
 pub use rnn::{GRUCell, LSTMCell, RNNCell, GRU, LSTM};
 pub use sequential::Sequential;
+pub use tape_linear::{Linear as TapeLinear, MLP as TapeMLP, TapeAdamW, TapeSGD};
 pub use transformer::{GPT2Config, TransformerBlock, GPT2};

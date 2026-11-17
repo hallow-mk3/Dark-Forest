@@ -116,7 +116,7 @@ impl KVCache {
         let mut k_guard = self.k_cache[layer_idx].data_mut();
         let mut v_guard = self.v_cache[layer_idx].data_mut();
         match (&mut k_guard.storage, &mut v_guard.storage) {
-            (crate::tensor::Storage::Cpu(k_arr), crate::tensor::Storage::Cpu(v_arr)) => {
+            (crate::tensor::LegacyStorage::Cpu(k_arr), crate::tensor::LegacyStorage::Cpu(v_arr)) => {
                 for h in 0..self.n_heads {
                     let offset = batch_idx * batch_stride + h * head_stride + pos * self.d_head;
                     let step_offset = h * self.d_head;
@@ -204,7 +204,7 @@ impl KVCache {
 
         let guard = cache.data();
         match &guard.storage {
-            crate::tensor::Storage::Cpu(v) => {
+            crate::tensor::LegacyStorage::Cpu(v) => {
                 for h in 0..self.n_heads {
                     let base = batch_idx * batch_stride + h * head_stride;
                     for s in 0..cur_len {
@@ -214,7 +214,7 @@ impl KVCache {
                 }
             }
             #[cfg(feature = "cuda")]
-            crate::tensor::Storage::Cuda(_) => {
+            crate::tensor::LegacyStorage::Cuda(_) => {
                 drop(guard);
                 for h in 0..self.n_heads {
                     let base = batch_idx * batch_stride + h * head_stride;

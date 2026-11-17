@@ -121,7 +121,7 @@ fn main() -> Result<()> {
         let q = q_res.unwrap();
         let k = k_res.unwrap();
         let v = v_res.unwrap();
-        let mut out = out_res.unwrap();
+        let out = out_res.unwrap();
 
         let (free_after, _) = get_memory_info().unwrap_or((0, 0));
         let actual_used_mb = (free_before.saturating_sub(free_after)) as f64 / (1024.0 * 1024.0);

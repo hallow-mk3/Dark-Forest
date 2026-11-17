@@ -35,10 +35,12 @@ All empirical measurements reported for v1.0.0 were evaluated on:
 Full training step (Forward pass + Cross-Entropy loss + Backward pass + AdamW optimizer update):
 - **Model Configuration**: 12 Layers, $d_{\text{model}}=768$, 12 Heads, $d_{\text{ff}}=3072$, Vocabulary 50,257, Batch Size 1, AdamW ($lr=10^{-4}, \beta_1=0.9, \beta_2=0.999, \epsilon=10^{-8}, \text{weight\_decay}=0.01$).
 - **Dark Forest Static Engine (Float32, TF32 MMA)**:
-  - $S = 128$: 38.84 ms median step time, 3,320.0 MB peak VRAM.
-  - $S = 512$: 112.62 ms median step time, 4,458.0 MB peak VRAM.
-  - $S = 1{,}024$: 320.37 ms median step time, 6,861.9 MB peak VRAM.
-  - $S = 2{,}048$: OOM (Exceeded 85% VRAM safety cap, 7,013.0 MB).
+  - $S = 128$: 51.06 ms median step time, 3,170.0 MB peak VRAM.
+  - $S = 512$: 185.16 ms median step time, 3,694.0 MB peak VRAM.
+  - $S = 1{,}024$: 380.78 ms median step time, 4,182.0 MB peak VRAM.
+  - $S = 2{,}048$: 849.60 ms median step time, 4,832.0 MB peak VRAM.
+  - $S = 4{,}096$: 2,652.66 ms median step time, 6,751.0 MB peak VRAM (under 85% safety cap).
+  - $S = 8{,}192$: OOM (Exceeded 85% VRAM safety cap, 7,013.0 MB).
 - **PyTorch SDPA Baseline (bf16 + Gradient Checkpointing + Unchunked CE)**:
   - $S = 128$: 54.8 ms / 2,099 MB.
   - $S = 8{,}192$: 698.6 ms / 6,151 MB.
@@ -49,11 +51,11 @@ Full training step (Forward pass + Cross-Entropy loss + Backward pass + AdamW op
 
 ### Isolated Attention Kernel Horizon
 Fused online-softmax forward attention pass in isolation (allocating only $Q, K, V, \text{Output}$ tensors):
-- $S = 8{,}192$: 190.7 ms, 96.0 MB working set.
-- $S = 16{,}384$: 756.9 ms, 192.0 MB working set.
-- $S = 32{,}768$: 3,782.6 ms, 384.0 MB working set.
-- $S = 65{,}536$: 23,711.1 ms, 768.0 MB working set.
-- $S = 131{,}072$: 108,989.4 ms, 1,536.0 MB working set.
+- $S = 8{,}192$: 80.8 ms, 96.0 MB working set.
+- $S = 16{,}384$: 318.7 ms, 192.0 MB working set.
+- $S = 32{,}768$: 1,261.6 ms, 384.0 MB working set.
+- $S = 65{,}536$: 5,931.1 ms, 768.0 MB working set.
+- $S = 131{,}072$: 41,480.2 ms, 1,536.0 MB working set.
 - $S \ge 262{,}144$: Allocation verified; kernel execution omitted due to $O(S^2)$ latency scaling.
 - $S = 2{,}097{,}152$: Exceeds physical 8 GB GPU capacity ($24.6\text{ GB}$ required for $Q, K, V, \text{Out}$ in fp32); verified graceful OOM handling.
 
@@ -62,7 +64,7 @@ Fused online-softmax forward attention pass in isolation (allocating only $Q, K,
 ## 4. Known Limitations
 
 1. **Fixed Static Allocation Horizon**: Static graph pre-allocation requires fixing the sequence length at initialization. Dynamically changing sequence length requires re-allocating workspace buffers.
-2. **Memory Footprint in Float32**: `StaticGPT2` pre-allocates all forward activations, backward gradients, and AdamW moments in Float32 without gradient checkpointing. It has a high base VRAM floor (~3.3 GB at $S=128$) and reaches the 8 GB device limit at $S=2{,}048$.
+2. **Memory Footprint in Float32**: `StaticGPT2` pre-allocates all forward activations, backward gradients, and AdamW moments in Float32 without gradient checkpointing. It has a base VRAM floor (~3.17 GB at $S=128$) and scales to $S=4{,}096$ (6.75 GB) before hitting the 8 GB device safety limit at $S=8{,}192$.
 3. **No Dynamic JIT Compiler Backend**: Dark Forest does not currently feature a Triton or TorchInductor equivalent JIT compiler for arbitrary dynamic op fusions.
 4. **Isolated Kernel vs Full Training Step Distinctions**: Isolated kernel scaling metrics (such as the 96 MB working set at $S=8,192$) must not be directly compared against full training step VRAM.
 

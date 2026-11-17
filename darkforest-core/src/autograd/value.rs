@@ -38,11 +38,10 @@ pub struct Value(pub(crate) Arc<Mutex<ValueInner>>);
 
 impl Value {
     pub fn update_tensor_data(&self, new_data: Vec<f32>) {
-        let inner = self.0.lock().unwrap();
+        let mut inner = self.0.lock().unwrap();
         let shape = inner.tensor.shape.clone();
         let device = inner.tensor.device.clone();
-        let mut storage = inner.tensor.storage.write().unwrap();
-        *storage = crate::tensor::TensorData::from_vec(new_data, &shape, &device);
+        inner.tensor = Tensor::from_vec_device(new_data, shape, device).unwrap();
     }
 
     pub fn to_device(&self, device: Device) -> Result<Value> {
@@ -112,14 +111,7 @@ impl Value {
     pub fn zero_grad(&self) {
         let mut inner = self.0.lock().unwrap();
         if let Some(ref g) = inner.grad {
-            // Zero the storage of the grad-accumulation Tensor directly
-            let mut guard = g.data_mut();
-            use crate::tensor::Storage;
-            match &mut guard.storage {
-                Storage::Cpu(v) => v.fill(0.0f32),
-                #[cfg(feature = "cuda")]
-                Storage::Cuda(d) => d.zero_().expect("CUDA zero_grad failed"),
-            }
+            g.zero_grad();
         } else {
             inner.grad = Some(Tensor::zeros_device(
                 inner.tensor.shape.clone(),
@@ -657,6 +649,32 @@ impl Value {
         }
 
         let grad_fn = Box::new(crate::autograd::grad_fn::GeluGradFn { x: t });
+        Ok(Value::from_op(out, grad_fn, vec![self.clone()]))
+    }
+
+    pub fn relu(&self) -> Result<Value> {
+        let t = self.tensor();
+        let data: Vec<f32> = t.to_vec().iter().map(|&v| v.max(0.0)).collect();
+        let out = Tensor::from_vec_device(data, t.shape.clone(), t.device.clone())?;
+
+        if !is_grad_enabled() {
+            return Ok(Value::leaf(out));
+        }
+
+        let grad_fn = Box::new(crate::autograd::grad_fn::ReluGradFn { x: t });
+        Ok(Value::from_op(out, grad_fn, vec![self.clone()]))
+    }
+
+    pub fn reshape(&self, new_shape: Vec<usize>) -> Result<Value> {
+        let t = self.tensor();
+        let orig_shape = t.shape.clone();
+        let out = t.reshape(new_shape)?;
+
+        if !is_grad_enabled() {
+            return Ok(Value::leaf(out));
+        }
+
+        let grad_fn = Box::new(crate::autograd::grad_fn::ReshapeGradFn { orig_shape });
         Ok(Value::from_op(out, grad_fn, vec![self.clone()]))
     }
 

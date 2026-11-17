@@ -1063,6 +1063,227 @@ impl StaticGPT2 {
         Ok(current_tokens)
     }
 
+    /// Paged-attention autoregressive generation.
+    ///
+    /// Uses a dynamic block-paged KV cache with no pre-allocated contiguous buffer,
+    /// enabling unlimited sequence lengths bounded only by GPU VRAM via
+    /// `PagedKVCache`. Memory is claimed per-page as tokens are decoded and
+    /// released in one batch on reset.
+    ///
+    /// # Arguments
+    /// * `paged_cache` — Caller-managed `PagedKVCache` (pre-allocated pool). Will
+    ///   be reset at the start of each call.
+    /// * `page_size`   — Physical page granularity (tokens per block, e.g. 16).
+    pub fn generate_paged(
+        &mut self,
+        prompt_tokens: &[usize],
+        max_new_tokens: usize,
+        paged_cache: &mut crate::engine::paged_kv::PagedKVCache,
+        cfg: &crate::engine::SamplerConfig,
+    ) -> Result<crate::engine::generate::GenerationReport> {
+        self.generate_paged_stream(prompt_tokens, max_new_tokens, paged_cache, cfg, |_| true)
+    }
+
+    /// Streaming paged-attention generation with per-token callback.
+    pub fn generate_paged_stream<F>(
+        &mut self,
+        prompt_tokens: &[usize],
+        max_new_tokens: usize,
+        paged_cache: &mut crate::engine::paged_kv::PagedKVCache,
+        cfg: &crate::engine::SamplerConfig,
+        mut on_token: F,
+    ) -> Result<crate::engine::generate::GenerationReport>
+    where
+        F: FnMut(usize) -> bool,
+    {
+        if prompt_tokens.is_empty() {
+            return Err(anyhow!("generate_paged_stream: prompt_tokens cannot be empty"));
+        }
+
+        paged_cache.reset();
+
+        let t_start = std::time::Instant::now();
+
+        // 1. Prefill — push each prompt token through the paged decode step
+        for (pos, &tok) in prompt_tokens.iter().enumerate() {
+            self.decode_step_paged(tok, pos, paged_cache)?;
+        }
+        let prefill_ms = t_start.elapsed().as_secs_f64() * 1000.0;
+
+        let mut output_tokens = prompt_tokens.to_vec();
+        let is_greedy_unpenalized = (cfg.temperature <= 1e-6 || cfg.top_k == 1)
+            && (cfg.repetition_penalty - 1.0).abs() < 1e-5;
+
+        let t_decode_start = std::time::Instant::now();
+        let mut stop_reason = crate::engine::generate::StopReason::MaxTokens;
+        let mut generated_count = 0usize;
+
+        // 2. Autoregressive decode loop
+        for step in 0..max_new_tokens {
+            let next_tok = if is_greedy_unpenalized {
+                self.decode_logits.argmax_device(&self.d_argmax_out)?;
+                self.d_argmax_out.async_download_to_pinned(&self.pinned_argmax, 0, 4)?;
+                crate::cuda_sync()?;
+                self.pinned_argmax.read_u32() as usize
+            } else {
+                self.decode_logits.async_download_slice_to_pinned(&self.pinned_logits, 0, self.vocab_size)?;
+                crate::cuda_sync()?;
+                let logits_slice = self.pinned_logits.as_f32_slice(self.vocab_size);
+                crate::engine::generate::sample_next_token_slice_with_context(
+                    logits_slice,
+                    &output_tokens,
+                    cfg,
+                )
+            };
+
+            output_tokens.push(next_tok);
+            generated_count += 1;
+
+            if !on_token(next_tok) {
+                stop_reason = crate::engine::generate::StopReason::Cancelled;
+                break;
+            }
+            if generated_count >= cfg.min_tokens && cfg.stop_tokens.contains(&next_tok) {
+                stop_reason = crate::engine::generate::StopReason::StopToken(next_tok);
+                break;
+            }
+
+            let next_pos = prompt_tokens.len() + step;
+            if step + 1 < max_new_tokens {
+                self.decode_step_paged(next_tok, next_pos, paged_cache)?;
+            }
+        }
+
+        let decode_ms = t_decode_start.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
+        let tok_s = if decode_ms > 0.0 {
+            (generated_count as f64 / decode_ms) * 1000.0
+        } else {
+            0.0
+        };
+        let ms_per_tok = if generated_count > 0 {
+            decode_ms / generated_count as f64
+        } else {
+            0.0
+        };
+
+        Ok(crate::engine::generate::GenerationReport {
+            tokens: output_tokens,
+            prompt_len: prompt_tokens.len(),
+            new_tokens: generated_count,
+            prefill_time_ms: prefill_ms,
+            decode_time_ms: decode_ms,
+            total_time_ms: total_ms,
+            tokens_per_sec: tok_s,
+            ms_per_token: ms_per_tok,
+            stop_reason,
+        })
+    }
+
+    /// Single-token decode step using paged KV cache.
+    ///
+    /// Identical pipeline to `decode_step` but stores K/V vectors via
+    /// `paged_cache.append_step` and dispatches `decode_paged_kv_into`
+    /// (non-contiguous physical block table) instead of the flat cache.
+    fn decode_step_paged(
+        &mut self,
+        token: usize,
+        pos: usize,
+        paged_cache: &mut crate::engine::paged_kv::PagedKVCache,
+    ) -> Result<()> {
+        let scale = (self.d_model as f32 / self.n_heads as f32).powf(-0.5);
+
+        // Upload single token & position indices
+        let tok_u32 = token as u32;
+        let pos_u32 = pos as u32;
+        self.d_single_tok.upload_bytes(&tok_u32 as *const u32 as *const u8, 4)?;
+        self.d_single_pos.upload_bytes(&pos_u32 as *const u32 as *const u8, 4)?;
+
+        // Embeddings
+        DeviceTensor::embedding_lookup_device_indices(
+            &self.d_single_tok,
+            1,
+            &self.tok_emb,
+            &mut self.decode_tok_out,
+        )?;
+        DeviceTensor::embedding_lookup_device_indices(
+            &self.d_single_pos,
+            1,
+            &self.pos_emb,
+            &mut self.decode_pos_out,
+        )?;
+
+        // x = tok + pos
+        self.decode_tok_out.add_into(&self.decode_pos_out, &mut self.decode_x)?;
+
+        for l in 0..self.n_layers {
+            let lw = &self.layers[l];
+
+            // LayerNorm 1
+            self.decode_x.layernorm_into(
+                Some(&lw.ln1_gamma),
+                Some(&lw.ln1_beta),
+                &mut self.decode_ln1_out,
+                &mut self.decode_ln1_mean,
+                &mut self.decode_ln1_rstd,
+            )?;
+
+            // Q, K, V projections
+            self.decode_ln1_out.gemv_into(&lw.wq, Some(&lw.bq), &mut self.decode_q)?;
+            self.decode_ln1_out.gemv_into(&lw.wk, Some(&lw.bk), &mut self.decode_k)?;
+            self.decode_ln1_out.gemv_into(&lw.wv, Some(&lw.bv), &mut self.decode_v)?;
+
+            // Append K, V to paged pool at position `pos`
+            paged_cache.append_step(l, &self.decode_k, &self.decode_v, pos)?;
+
+            // Paged KV decode attention
+            let cur_seq_len = paged_cache.cur_len();
+            paged_cache.decode_attention(
+                l,
+                &self.decode_q,
+                &self.attn_contexts[l],
+                cur_seq_len,
+                scale,
+                &mut self.decode_attn_out,
+            )?;
+
+            // Output projection + residual
+            self.decode_attn_out.gemv_into(&lw.wo, Some(&lw.bo), &mut self.decode_proj_out)?;
+            self.decode_x.add_into(&self.decode_proj_out, &mut self.decode_x_mid)?;
+
+            // LayerNorm 2
+            self.decode_x_mid.layernorm_into(
+                Some(&lw.ln2_gamma),
+                Some(&lw.ln2_beta),
+                &mut self.decode_ln2_out,
+                &mut self.decode_ln2_mean,
+                &mut self.decode_ln2_rstd,
+            )?;
+
+            // MLP
+            self.decode_ln2_out.gemv_into(&lw.w1, Some(&lw.b1), &mut self.decode_mlp_h)?;
+            self.decode_mlp_h.gelu_into(&mut self.decode_mlp_a)?;
+            self.decode_mlp_a.gemv_into(&lw.w2, Some(&lw.b2), &mut self.decode_mlp_out)?;
+
+            // Second residual
+            self.decode_x_mid.add_into(&self.decode_mlp_out, &mut self.decode_x)?;
+        }
+
+        // Final LayerNorm
+        self.decode_x.layernorm_into(
+            Some(&self.ln_f_gamma),
+            Some(&self.ln_f_beta),
+            &mut self.decode_ln_f_out,
+            &mut self.decode_ln_f_mean,
+            &mut self.decode_ln_f_rstd,
+        )?;
+
+        // LM Head
+        self.decode_ln_f_out.gemv_into(&self.lm_head, None, &mut self.decode_logits)?;
+
+        Ok(())
+    }
+
 
     /// Forward kernel dispatch pass across embeddings, all transformer blocks, and final layernorm.
     /// Does not project full logits, maintaining linear memory scaling and avoiding VRAM spikes.
@@ -1275,7 +1496,7 @@ impl StaticGPT2 {
                 Some(&mut lg.d_bo),
             )?;
 
-            // FlashAttention backward: d(q), d(k), d(v)
+            // Fused online-softmax attention backward: d(q), d(k), d(v)
             self.attn_contexts[l].backward_device_into(
                 &la.q,
                 &la.k,
@@ -1794,7 +2015,7 @@ impl StaticGPT2 {
             .map_err(|e| anyhow!("load_checkpoint: cannot open {:?}: {e}", path))?;
         let mut r = BufReader::new(file);
 
-        let mut read_vec = |r: &mut BufReader<std::fs::File>| -> Result<Vec<f32>> {
+        let read_vec = |r: &mut BufReader<std::fs::File>| -> Result<Vec<f32>> {
             let mut len_bytes = [0u8; 8];
             r.read_exact(&mut len_bytes)?;
             let n = u64::from_le_bytes(len_bytes) as usize;
@@ -2460,15 +2681,19 @@ impl StaticGPT2 {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn layer_wq_mut(&mut self, l: usize) -> &mut Vec<f32> {
         &mut self.layer_wq[l]
     }
+    #[allow(dead_code)]
     pub(crate) fn layer_wk_mut(&mut self, l: usize) -> &mut Vec<f32> {
         &mut self.layer_wk[l]
     }
+    #[allow(dead_code)]
     pub(crate) fn layer_wv_mut(&mut self, l: usize) -> &mut Vec<f32> {
         &mut self.layer_wv[l]
     }
+    #[allow(dead_code)]
     pub(crate) fn layer_wo_mut(&mut self, l: usize) -> &mut Vec<f32> {
         &mut self.layer_wo[l]
     }

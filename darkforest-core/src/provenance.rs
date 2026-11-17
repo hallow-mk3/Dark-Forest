@@ -5,8 +5,8 @@
 //!
 //! - **Cryptographic Hash Chaining**: Every weight update forms an immutable hash-linked block
 //! - **Non-Poisoning Proofs**: Verifies gradient norm bounds, parameter variance, and loss bounds
-//! - **Zero-Knowledge Auditing**: Verifiers can confirm training data lineage and mathematical convergence
-//!   without inspecting proprietary weight tensors or training data
+//! - **Cryptographic Audit Ledger**: Verifiers can confirm training data lineage and mathematical convergence
+//!   via Merkle commitment hashes without sharing full uncompressed dataset corpora
 
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};

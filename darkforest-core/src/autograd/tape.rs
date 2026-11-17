@@ -11,6 +11,15 @@ pub fn is_grad_enabled() -> bool {
     GRAD_ENABLED.with(|g| g.get())
 }
 
+/// Set whether autograd is enabled on this thread, returning previous state.
+pub fn set_grad_enabled(enabled: bool) -> bool {
+    GRAD_ENABLED.with(|g| {
+        let prev = g.get();
+        g.set(enabled);
+        prev
+    })
+}
+
 /// Guard that disables gradient tracking for the duration of a closure.
 /// Restores previous state on drop.
 pub struct NoGradGuard {

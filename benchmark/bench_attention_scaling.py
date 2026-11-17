@@ -2,11 +2,10 @@
 
 This benchmark rigorously evaluates:
 1. Naive Attention (Materializes O(S^2) intermediate attention score matrix)
-2. Fused Tiled Attention / FlashAttention (Computes online softmax in registers/SRAM)
-3. PyTorch Built-in SDPA baseline (torch.nn.functional.scaled_dot_product_attention)
+2. PyTorch Built-in SDPA baseline (torch.nn.functional.scaled_dot_product_attention online softmax)
 
 Measures:
-- Forward & Backward Latency (ms)
+- Forward Latency (ms)
 - Peak GPU VRAM allocated (MB)
 - Memory Reduction Factor
 - OOM Horizon Boundary
@@ -99,7 +98,7 @@ def run_benchmark_suite(
     device: str = "cuda",
 ) -> Dict[str, Any]:
     print(f"================================================================================")
-    print(f" IRIS Attention Scaling Benchmark: Naive vs Fused FlashAttention")
+    print(f" IRIS Attention Scaling Benchmark: Naive Quadratic vs PyTorch SDPA Online Softmax")
     print(f" Target Hardware: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     print(f" Batch Size: {batch_size}, Heads: {num_heads}, Head Dim: {head_dim}")
     print(f"================================================================================\n")
@@ -134,7 +133,7 @@ def run_benchmark_suite(
             row["naive_vram_mb"] = "OOM"
             row["naive_act_mb"] = "OOM"
 
-        # 2. Fused FlashAttention (SDPA with Flash/Fused backend)
+        # 2. PyTorch SDPA (online softmax backend)
         try:
             fused_res = measure_attention_variant(
                 lambda _q, _k, _v: F.scaled_dot_product_attention(_q, _k, _v, is_causal=True),
